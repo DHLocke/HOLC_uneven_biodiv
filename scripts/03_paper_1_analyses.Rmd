@@ -1,0 +1,576 @@
+---
+title: "03_paper_1_analyses"
+author: "Dexter H. Locke, PhD"
+date: "`r format(Sys.time())`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# 0 set up: load libraries, custom functions, set defaults
+```{r}
+
+# load libraries
+# packages we'll be using
+packs <- c(
+    'tidyverse'         # a must have!
+  , 'tidylog'         # makes things very verbose for 2x checking 
+  , 'magrittr'        # all of the pipes
+  , 'janitor'         # cleans things up
+  , 'tictoc'          # times things
+  , 'beepr'           # makes noises
+  , 'sjPlot'          # model diagnostics and plotting
+  , 'performance'     # model diagnostics
+  , 'ggpubr'          # easily adds pvals to boxplots
+  , 'patchwork' # for pulling ggplot objects together
+  )         
+
+# check for all of the libraries
+if (length(setdiff(packs, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packs, rownames(installed.packages())))  
+}
+
+# load them
+vapply(packs, library, character.only = TRUE, logical(1), logical.return = TRUE, quietly = TRUE)
+
+
+# keep random things consistent
+set.seed(19870630) # needed?
+
+
+# redlining colors
+holc_pal <- c('#92BC6B' # green
+              , '#92C7C9' # blue
+              , '#E7DC6B' # yellow
+              , '#E47D67' # red
+              #, '#A9A9A9'
+              ) # dark gray)
+
+```
+
+
+# 1 read in data
+## A main analysis table
+```{r}
+
+(comb <- read_csv(paste0(getwd(), '/input_data/main_combined_2022-05-27.csv')))
+
+# a few checks
+comb |> glimpse()
+
+
+# how many GBIF observations?
+sum(comb$records, na.rm = TRUE)
+#sum(comb$observed_richness, na.rm = TRUE)
+
+# in how many HOLC polygons
+dim(comb)[1]
+
+# in how many MSAs
+comb |>  tabyl(msa_NAME) |> tibble() |> nrow()
+
+# in how many cities
+comb |>  tabyl(city) |> tibble() |> nrow()
+
+# in how many States
+comb |>  tabyl(state) |> tibble() |> nrow()
+
+# how do MSA and city line up?
+comb |> tabyl(msa_NAME, city) |> tibble()
+
+
+# a little EDA
+comb |> summary()
+comb |> map(~sum(is.na(.))) |> bind_rows() |> t()
+
+comb |> filter(is.na(holc_id)) |> View()
+(comb |> filter(is.na(holc_tot_pop)) -> no_pop)
+no_pop |> View()
+# poly |> filter(id %in% no_pop$id) |> mapview::mapview() # these areas are no longer residential
+
+# examine dependent variables
+comb |> 
+  select(id, sampling_density, sampling_density_log, completeness, completeness_log) |> 
+  pivot_longer(-id) |>
+  ggplot(aes(value)) + 
+  # geom_density() + 
+  geom_histogram() + 
+  facet_wrap(~name, scales = 'free') + 
+  NULL
+
+# COMPLETENESS AND SAMPLING DENSITY LOG
+
+comb |> 
+  filter(holc_grade != 'E') |> 
+  ggplot(aes(completeness)) +
+  geom_density() + 
+  facet_wrap(~holc_grade)
+
+```
+
+
+## B Coldspots
+```{r}
+
+(coldspots <- read_csv(paste0(getwd(), '/input_data/coldspots.csv')))
+
+
+coldspot_regions <- plyr::ddply(coldspots, 'holc_grade', function(x){
+  data.frame(
+    n_row_total_n_coldspot_polygons = nrow(x),
+    percent_coldspots = (  ( nrow(x) / nrow(coldspots) ) * 100 )
+  )
+})
+
+coldspot_regions
+
+```
+
+
+
+# 2 viz
+## A pub figure 2
+```{r}
+
+my_comparisons <- list(c("A", "B"), c("A", "C"), c("A", "D"))
+
+# I sampling density
+(
+  I_density <- comb |> 
+    filter(holc_grade != 'E') |>
+    # mutate(holc_grade = factor(holc_grade, levels = LETTERS[1:4], ordered = TRUE)) |> 
+    # arrange(id, holc_grade) |> 
+    group_by(holc_grade) |> 
+    summarise(total_sampling_density = sum(records, na.rm = TRUE)
+              , total_area = sum(area_holc_km2, na.rm = TRUE))  |>  
+    mutate(`Sampling Density` = total_sampling_density / total_area, `HOLC Grade` = holc_grade) |>
+    ggplot(aes(`HOLC Grade`, `Sampling Density`, fill = holc_grade)) +
+    geom_col() + 
+    scale_fill_manual(values = holc_pal) + 
+    scale_y_continuous(expand = c(0, 0), limits = c(0, 1400)) + 
+    # theme_bw(16) + 
+    theme_classic(16) + 
+    theme(legend.position = 'none') + 
+    NULL
+  )
+
+# ggsave(paste0(getwd(), '/figures/fig_2a_', Sys.Date(), '.png')
+#        , width = 3.42
+#        , height = 4
+#        , dpi = 600
+#        )
+
+
+# capitalize completeness, ditch horizontal axis lab
+(
+  II_completeness <- comb |> 
+    filter(holc_grade != 'E') |> 
+    select(Completeness = completeness, `HOLC Grade` = holc_grade) |> 
+    # replace_na(list(Completeness = 0)) |> 
+    ggboxplot(x = 'HOLC Grade', y = 'Completeness'
+              , palette = holc_pal
+              , fill = 'HOLC Grade'
+              , ggtheme = theme_pubr(base_size = 16)) +
+    stat_compare_means(comparisons = my_comparisons) +  # Add pairwise comparisons p-value
+    scale_y_continuous(expand = c(0, 0)) +
+    ylim(0, 130) + 
+    # theme_blank(16) +
+    theme(legend.position = 'none')
+  )
+
+# ggsave(paste0(getwd(), '/figures/fig_2b_', Sys.Date(), '.png')
+#        , width = 3.42
+#        , height = 4
+#        , dpi = 600
+#        )
+
+(
+  III_coldspots <- coldspot_regions |> 
+  # mutate(`HOLC Grade` = factor(holc_grade)) |> 
+    select(`HOLC Grade` = holc_grade, `% of polygons considered coldspots` = percent_coldspots) |> 
+    ggplot(aes(`HOLC Grade`, `% of polygons considered coldspots`, fill = `HOLC Grade`)) + 
+    geom_bar(stat="identity") + 
+    theme_classic(16) + 
+    scale_fill_manual(values = holc_pal) + 
+    theme(legend.position = 'none') + 
+    scale_y_continuous(expand = c(0, 0), limits = c(0, 45)) +
+    NULL
+  )
+
+# ggsave(paste0(getwd(), '/figures/fig_2c_', Sys.Date(), '.png')
+#        , width = 3.42
+#        , height = 4
+#        , dpi = 600
+#        )
+
+
+I_density / II_completeness / III_coldspots +  plot_annotation(tag_levels = 'I')
+
+ggsave(paste0(getwd(), '/figures/fig_2_', Sys.Date(), '.png')
+       , width = 3.42*2
+       , height = 6*2
+       , dpi = 600
+       )
+
+```
+
+
+
+# 4 model
+## A sampled or not: logistic regression for 
+```{r}
+
+comb |> glimpse()
+
+(comb |> 
+  mutate(sample_bin = ifelse(is.na(sampling_density_log), 0, 1)) |> 
+  tabyl(holc_grade, sample_bin) |> adorn_percentages() |> 
+  tibble() |> 
+  setNames(c('HOLC Grade', 'not sampled', 'sampled')) |> 
+  pivot_longer(-`HOLC Grade`) |> 
+  filter(`HOLC Grade` != 'E') -> sampled_or_not)
+
+sampled_or_not |>  
+  ggplot(aes(`HOLC Grade`, value, fill = name)) + 
+  geom_col(
+    #position = 'dodge'
+    ) + 
+  theme_bw(16) + 
+  NULL
+
+sampled_or_not %>% lm(value ~ name*`HOLC Grade`, data = .) %>% broom::tidy()
+sampled_or_not %>% aov(value ~ name*`HOLC Grade`, data = .) %>% broom::tidy()
+
+
+tic(); comb %>% 
+  # sample_frac(.1) |> # for testing
+  mutate(sample_binary = ifelse(is.na(sampling_density_log), 0, 1)) %>%
+  filter(holc_grade != 'E') %>% # TODO make this D or drop?
+  lme4::glmer(
+    sample_binary ~ holc_grade + 
+       (1 | msa_NAME)
+    , data = .
+    , family = binomial(link = "logit")) -> samp_d_binary_holc; toc() # < 2 seconds
+
+tic(); comb %>% 
+  # sample_frac(.1) |> # for testing
+  mutate(sample_binary = ifelse(is.na(sampling_density_log), 0, 1)) %>%
+  filter(holc_grade != 'E') %>% # TODO make this D or drop?
+  lme4::glmer(
+    sample_binary ~ holc_grade + 
+       (holc_grade | msa_NAME)
+    , data = .
+    , family = binomial(link = "logit")) -> samp_d_binary_holc_rirs; toc() # < 2 seconds
+
+
+# tic(); comb %>%
+#   # sample_frac(.1) |> # for testing
+#   mutate(sample_binary = ifelse(is.na(sampling_density_log), 0, 1)) %>%
+#   filter(holc_grade != 'E') %>%
+#   lme4::glmer(
+#     sample_binary ~ holc_grade + ndvi + pct_pa + pop_per_km +
+#       (1 + holc_grade + msa_gini | msa_NAME) +
+#       (1 + mean_temp_c*mean_precip_mm | city)
+#     , data = .
+#     , family = binomial(link = "logit")) -> samp_d_binary_max; toc() # ~1 hr, lots of warnings
+
+# save(samp_d_binary_max, file = paste0('model_objects/samp_d_binary_max_', Sys.Date(), '.RData'))
+load('model_objects/samp_d_binary_max_2022-06-13.RData')
+
+
+tic(); compare_performance(samp_d_binary_holc, samp_d_binary_holc_rirs, samp_d_binary_max
+                           , rank = TRUE); toc()
+
+samp_d_binary_holc_rirs |> summary() # wins
+# samp_d_binary_max |> summary()
+tab_model(samp_d_binary_holc_rirs)
+tab_model(samp_d_binary_holc_rirs, transform = 'exp')
+tab_model(samp_d_binary_holc_rirs, samp_d_binary_max, transform = 'exp')
+plot_model(samp_d_binary_holc_rirs, type = 'pred')
+plot_model(samp_d_binary_holc_rirs, type = 'est')
+
+# tab_model(samp_d_binary_max)
+# tab_model(samp_d_binary_max, transform = 'exp')
+# plot_model(samp_d_binary_max, type = 'pred')$holc_grade
+# plot_model(samp_d_binary_max, type = 'pred')
+# plot_model(samp_d_max, type = 'est')
+# plot_model(samp_d_max, type = 'est', transform = 'exp')
+# plot_model(samp_d_max, type = 're')
+# plot_model(samp_d_max, type = 'diag')
+
+```
+
+
+
+## B sampling density
+```{r}
+
+# fit models
+d_null <-            lm(log(sampling_density) ~ 1                                                          , data = comb |> filter(sampling_density_log > -Inf)) 
+d_lm   <-            lm(log(sampling_density) ~ holc_grade                                                 , data = comb |> filter(sampling_density_log > -Inf)) 
+                                
+d_null_ri <- lme4::lmer(log(sampling_density) ~ 1          + (1 | msa_NAME)                                , data = comb |> filter(sampling_density_log > -Inf))
+d_ri      <- lme4::lmer(log(sampling_density) ~ holc_grade + (1 | msa_NAME)                                , data = comb |> filter(sampling_density_log > -Inf))
+
+d_rirs    <- lme4::lmer(log(sampling_density) ~ holc_grade + (1 + holc_grade | msa_NAME)                   , data = comb |> filter(sampling_density_log > -Inf))
+
+# # #winners
+# d_fe_ri2   <- lme4::lmer(log(sampling_density) ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (1 | msa_NAME)                , data = comb |> filter(sampling_density_log > -Inf), REML = TRUE)
+# d_fe_rirs2 <- lme4::lmer(log(sampling_density) ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (1 + holc_grade| msa_NAME)    , data = comb |> filter(sampling_density_log > -Inf), REML = TRUE)
+
+d_fe_ri   <- lme4::lmer(log(sampling_density) ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (1 | msa_NAME)                , data = comb |> filter(sampling_density_log > -Inf))
+d_fe_rirs <- lme4::lmer(log(sampling_density) ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (1 + holc_grade| msa_NAME)    , data = comb |> filter(sampling_density_log > -Inf))
+
+
+d_fe_ri_clim<- lme4::lmer(log(sampling_density) ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (mean_temp_c*mean_precip_mm | msa_NAME)
+                          , data = comb |> filter(sampling_density_log > -Inf))
+
+d_fe_ri_clim_inc<- lme4::lmer(log(sampling_density) ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (mean_temp_c*mean_precip_mm + msa_medhhincE | msa_NAME)
+                          , data = comb |> filter(sampling_density_log > -Inf))
+
+d_fe_rirs_clim_inc<- lme4::lmer(log(sampling_density) ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (holc_grade + mean_temp_c*mean_precip_mm + msa_medhhincE | msa_NAME)
+                          , data = comb |> filter(sampling_density_log > -Inf))
+
+# find winners
+tic(); compare_performance(
+    d_null
+  , d_lm
+  , d_null_ri
+  , d_ri
+  , d_rirs
+  , d_fe_ri
+  , d_fe_rirs
+  , d_fe_ri_clim
+  , d_fe_ri_clim_inc
+  , d_fe_rirs_clim_inc
+  , rank = TRUE
+  ); toc(); beepr::beep() # ~13 mins
+
+# examine to most popular models, tabularly
+tab_model(d_fe_rirs, d_fe_ri, show.aic = TRUE) # also solid d_fe_rirs_clim_inc
+tab_model(d_fe_rirs, d_fe_ri, transform = 'exp', show.aic = TRUE)
+
+# examine to most popular models, graphically
+d_fe_rirs |> plot_model()
+d_fe_rirs |> plot_model(type = 'std')
+d_fe_rirs |> plot_model(type = 'pred')
+plot_model(d_fe_rirs, type = 'pred')$holc_grade
+
+
+
+# build ylab
+y1 <- expression(Sampling ~ Density: ~observations ~ per ~ km^2)
+
+(plot_model(d_fe_rirs, type = 'pred')$holc_grade + 
+  # ylim(-10, 315) +
+  theme_bw(14) + 
+  scale_y_continuous(expand = c(0.0, .15), breaks = seq(0, 350, 50), limits = c(0, 300)) +
+  labs(y = y1, x = 'HOLC Grade', title = 'Predicted Sampling Density') + 
+  NULL -> p_sampling_density)
+
+
+# ggsave(  filename = paste0(getwd(), '/figures/p_sampling_density_', Sys.Date(), '.png')
+#        , width = 8.7, height = 10, units = 'cm', dpi = 450
+#        , scale = 1.25)
+  
+plot_model(d_fe_rirs, type = 'pred', transform = 'exp')$holc_grade
+plot_model(d_fe_rirs, type = 'pred', transform = 'exp')$holc_grade + ylim(0, 300) + theme_bw(16)
+
+
+d_fe_rirs |> plot_model(type = 're') #, sort.est = TRUE)
+d_fe_rirs |> plot_model(type = 'diag')
+
+
+# PREDICTIONS
+comb |> 
+  filter(sampling_density_log > -Inf) |> 
+  mutate(
+      FRa = predict(d_fe_ri)
+    , FRb = predict(d_fe_rirs)) -> comp_pred
+
+# comp_pred |> View()
+
+# get big and small cities
+(comp_pred |> tabyl(city) |> tibble() |> arrange(desc(n)) |> slice(1:48) -> big_city)
+(comp_pred |> tabyl(city) |> tibble() |> arrange(n)       |> slice(1:48) -> small_city)
+
+
+comp_pred |> 
+  filter(city %in% big_city$city) |>
+  # filter(city %in% small_city$city) |> 
+  ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+  geom_point(alpha = .5) +
+  geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) + 
+  facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y') +
+  # facet_wrap(~holc_grade) + 
+  theme_bw(10) + 
+  NULL
+
+comp_pred |> 
+  # filter(city %in% big_city$city) |>
+  filter(city %in% small_city$city) |>
+  ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+  geom_point(alpha = .5) +
+  geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) + 
+  facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y') +
+  # facet_wrap(~holc_grade) + 
+  theme_bw(10) + 
+  NULL
+
+
+# # City-specific predictions
+# comp_pred |> 
+#   filter(city %in% big_city$city) |>
+#   # filter(city %in% small_city$city) |> 
+#   ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+#   geom_point() +
+#   geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) + 
+#   facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y') +
+#   # facet_wrap(~holc_grade) + 
+#   theme_bw(10) + 
+#   NULL
+
+
+# comp_pred |> 
+#   filter(city %in% big_city$city) |>
+#   # filter(city %in% small_city$city) |> 
+#   ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+#   geom_point() +
+#   geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) + 
+#   
+#   # facet_wrap(~holc_grade) + 
+#   theme_bw(10) + 
+#   NULL
+
+# comp_pred |>
+#   # filter(city %in% big_city$city) |>
+#   ggplot(aes(holc_grade, FRb, group = msa_NAME)) +
+#   geom_point(alpha = .01) +
+#   geom_line(aes(group = msa_NAME), alpha = .1) +
+#   # facet_wrap(~msa_NAME) +
+#   # facet_wrap(~holc_grade) + 
+#   theme_bw(16) + 
+#   ylim(0, 10) +
+#   NULL
+
+
+```
+
+
+
+## C completeness
+```{r}
+
+tic()
+# fit models
+c_null <-            lm(completeness ~ 1                                                          , data = comb |> filter(holc_grade != 'E')) 
+c_lm   <-            lm(completeness ~ holc_grade                                                 , data = comb |> filter(holc_grade != 'E')) 
+                                
+c_null_ri <- lme4::lmer(completeness ~ 1          + (1 | msa_NAME)                                , data = comb |> filter(holc_grade != 'E'), REML = TRUE)
+c_ri      <- lme4::lmer(completeness ~ holc_grade + (1 | msa_NAME)                                , data = comb |> filter(holc_grade != 'E'), REML = TRUE)
+
+c_rirs    <- lme4::lmer(completeness ~ holc_grade + (1 + holc_grade | msa_NAME)                   , data = comb |> filter(holc_grade != 'E'), REML = TRUE)
+
+# winners
+c_fe_ri   <- lme4::lmer(completeness ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (1 | msa_NAME)                , data = comb |> filter(holc_grade != 'E'), REML = TRUE)
+c_fe_rirs <- lme4::lmer(completeness ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (1 + holc_grade| msa_NAME)    , data = comb |> filter(holc_grade != 'E'), REML = TRUE)
+
+
+c_fe_ri_clim<- lme4::lmer(completeness ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (mean_temp_c*mean_precip_mm | msa_NAME)
+                          , data = comb |> filter(holc_grade != 'E'), REML = TRUE)
+
+c_fe_ri_clim_inc<- lme4::lmer(completeness ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (mean_temp_c*mean_precip_mm + msa_medhhincE | msa_NAME)
+                          , data = comb |> filter(holc_grade != 'E'), REML = TRUE)
+
+c_fe_rirs_clim_inc<- lme4::lmer(completeness ~ holc_grade + scale(ndvi) + scale(pct_pa) + scale(pop_per_km) + (holc_grade + mean_temp_c*mean_precip_mm + msa_medhhincE | msa_NAME)
+                          , data = comb |> filter(holc_grade != 'E'), REML = TRUE)
+toc() # ~15 seconds
+
+# find winners
+tic(); compare_performance(
+    c_null
+  , c_lm
+  , c_null_ri
+  , c_ri
+  , c_rirs
+  , c_fe_ri
+  , c_fe_rirs
+  , c_fe_ri_clim
+  , c_fe_ri_clim_inc
+  , c_fe_rirs_clim_inc
+  , rank = TRUE
+  ); toc()
+
+
+
+# examine to most popular models
+tab_model(c_fe_ri, d_fe_rirs_clim_inc, c_fe_rirs) # also solid 
+
+# just a few ways to look at same thing
+c_fe_ri |> plot_model()
+c_fe_ri |> plot_model(type = 'std')
+c_fe_ri |> plot_model(type = 'pred')
+plot_model(c_fe_ri, type = 'pred')$holc_grade
+plot_model(c_fe_ri, type = 'pred')$holc_grade + ylim(0, 70) + theme_bw(16)
+
+
+(# plot_model(c_fe_rirs, type = 'pred')$holc_grade + 
+  plot_model(c_fe_ri, type = 'pred')$holc_grade + 
+  theme_bw(14) + 
+  # scale_y_continuous(expand = c(0.0, .15), limits = c(0, 70), breaks = seq(0, 70, 10)) +
+  labs(y = 'Completeness', x = 'HOLC Grade', title = 'Predicted Completeness') + 
+  NULL -> p_completeness)
+  
+
+# ggsave(  filename = paste0(getwd(), '/figures/p_completeness_', Sys.Date(), '.png')
+#        , width = 8.7, height = 10, units = 'cm', dpi = 450
+#        , scale = 1.25)
+
+# table of predictions
+ggeffects::ggpredict(c_fe_ri)
+
+p_sampling_density / p_completeness + plot_annotation(tag_levels = 'I') 
+
+ggsave(  filename = paste0(getwd(), '/figures/fig_3_p_combined_', Sys.Date(), '.png')
+       , width = 8.7, height = 10*2, units = 'cm', dpi = 450
+       , scale = 1.25)
+
+c_fe_rirs |> plot_model(type = 're') #, sort.est = TRUE)
+c_fe_rirs |> plot_model(type = 'diag')
+
+
+```
+
+
+## D nice tables of 3 best mods
+```{r}
+
+tab_model(samp_d_binary_holc_rirs) 
+tab_model(d_fe_rirs, transform  = 'exp')
+tab_model(c_fe_ri)
+
+
+# tab_model(samp_d_binary_holc_rirs, d_fe_rirs, c_fe_ri,
+#           file = paste0('output_tables/model_table_', Sys.Date(), '.html'))
+# 
+# tab_model(d_fe_rirs, transform  = 'exp',
+#           file = paste0('output_tables/model_table_EXP', Sys.Date(), '.html'))
+# 
+# 
+# 
+# tab_model(d_fe_rirs, d_fe_rirs_clim_inc, transform  = 'exp', show.aic = TRUE, show.aicc = TRUE,
+#           file = paste0('output_tables/model_table_sampling_d_maximal_', Sys.Date(), '.html'))
+# 
+tab_model(c_fe_ri, c_fe_rirs_clim_inc, show.aic = TRUE, show.aicc = TRUE,
+          file = paste0('output_tables/model_table_completeness_maximal_', Sys.Date(), '.html'))
+
+```
+
+# End
