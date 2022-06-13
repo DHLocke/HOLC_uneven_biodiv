@@ -509,7 +509,6 @@ tic(); compare_performance(
   ); toc()
 
 
-
 # examine to most popular models
 tab_model(c_fe_ri, d_fe_rirs_clim_inc, c_fe_rirs) # also solid 
 
@@ -555,7 +554,6 @@ c_fe_rirs |> plot_model(type = 'diag')
 tab_model(samp_d_binary_holc_rirs) 
 tab_model(d_fe_rirs, transform  = 'exp')
 tab_model(c_fe_ri)
-
 
 # tab_model(samp_d_binary_holc_rirs, d_fe_rirs, c_fe_ri,
 #           file = paste0('output_tables/model_table_', Sys.Date(), '.html'))
