@@ -1,0 +1,1638 @@
+---
+title: "MSA_CBG_Links_equity"
+author: "Dexter H. Locke, PhD"
+date: "`r format(Sys.time())`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+GET SINGLE PART DATA STASHED
+THEN REPEAT AS MULTIPART
+
+
+TODO Poulation size, population density
+
+
+
+"metropolitan statistical area/micropolitan statistical area"
+
+Assign HOLC to MSA
+  machinery in place, have not committed (see bottom of 2A)
+
+Filter CBG to to MSA
+  done
+
+Calculate MSA-level stats (gini and M)
+
+Areal interpolate HOLC with modern demos?
+  present and past
+  
+EDA
+
+draft models
+
+
+# TODO
+birds, HOLC_grade, HOLC_race_x, HOLC_medhhinc?, MSA_M, MSA_gini, MSA_race_x, MSA_medhhinc, + climate (precip and temp), country region (eco-not social)
+  % water
+  A water
+
+  
+## 0 set up: load libraries, custom functions, set defaults
+```{r}
+
+# load libraries
+# packages we'll be using
+packs <- c(
+  'tidyverse'         # a must have!
+  , 'tidylog'         # makes things very verbose for 2x checking 
+  , 'magrittr'        # all of the pipes
+  , 'janitor'         # cleans things up
+  , 'sf'              # spatial support
+  , 'tidycensus'      # Census access
+  , 'mapview'         # webmaps
+  , 'tictoc'          # times things
+  , 'beepr'           # makes noises
+  , 'segregation'     # segregation indecies like M
+  , 'dineq'           # Gini Coefficient (and decomposition?)
+  # , 'performance'     # model diagnostics
+  )         
+
+# check for all of the libraries
+if (length(setdiff(packs, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packs, rownames(installed.packages())))  
+}
+
+# load them
+vapply(packs, library, character.only = TRUE, logical(1), logical.return = TRUE, quietly = TRUE)
+
+
+# setting for get_acs
+census_api_key('db9b3481879b9e79eb8c86608656c3c8a8640bbb', install = TRUE, overwrite = TRUE)
+readRenviron("~/.Renviron")
+options(tigris_use_cache = TRUE)
+
+# keep random things consistent
+# set.seed(19870630) # needed?
+
+
+# redlining colors
+holc_pal <- c('#92BC6B' # green
+              , '#92C7C9' # blue
+              , '#E7DC6B' # yellow
+              , '#E47D67' # red
+              #, '#A9A9A9'
+              ) # dark gray)
+
+holc_pal_f<- c('#92BC6B' # green
+              , '#92C7C9' # blue
+              , '#E7DC6B' # yellow
+              , '#E47D67' # red
+              , '#A9A9A9'
+              , '#000000')
+
+
+# set custom function for getting spatial data
+see_sf <- function(){
+# what's in memory that are sf - spatial features?
+keep(eapply(.GlobalEnv, class),      # gets the objects in the global environment
+     ~ any(str_detect(., "sf"))) %>% # selects elements with sf in them
+    names(.) %>% as.character(.)     # my simple features
+}
+
+see_sf() -> sf_in_memory
+
+# what are the spatial references of those SF classes?
+mget(sf_in_memory) %>% purrr::map(~st_crs(.x)$epsg) %>% unlist() #%>% View()
+
+
+# # get file size
+# for(obj in ls()){message(obj); print(object.size(get(obj)), units='auto'); cat('\n')}; rm(obj)
+
+# thanks Phil Donovan @philip_donovan
+# https://www.spatialanalytics.co.nz/post/2018/04/01/fixing-st-par/
+# Paralise any simple features analysis.
+st_parallel <- function(sf_df, sf_func, n_cores, ...){
+
+  # Create a vector to split the data set up by.
+  split_vector <- rep(1:n_cores, each = nrow(sf_df) / n_cores, length.out = nrow(sf_df))
+
+  # Perform GIS analysis
+  split_results <- split(sf_df, split_vector) %>%
+    parallel::mclapply(function(x) sf_func(x, ...), mc.cores = n_cores)
+
+
+  # Define the output_class. If length is greater than two, then grab the second variable.
+  output_class <- class(split_results[[1]])
+  if (length(output_class) == 2){
+    output_class <- output_class[2]
+  }
+
+  # Combine results back together. Method of combining depends on the output from the function.
+  if (output_class == "matrix"){
+    result <- do.call("rbind", split_results)
+    names(result) <- NULL
+  } else if (output_class == "sfc") {
+    result <- do.call("c", split_results)
+    result <- sf_func(result) # do.call combines the list but there are still n_cores of the geometry which had been split up. Running st_union or st_collect gathers them up into one, as is the expected output of these two functions.
+  } else if (output_class %in% c('list', 'sgbp') ){
+    result <- do.call("c", split_results)
+    names(result) <- NULL
+  } else if (output_class == "data.frame" ){
+    result <- do.call("rbind", split_results)
+  } else {
+    stop("Unknown class. st_parallel only accepts the following outputs at present: sfc, list, sf, matrix, sgbp.")
+  }
+
+  # Return result
+  return(result)
+}
+
+
+# custom function for "Not In"
+`%nin%` <- Negate(`%in%`)
+
+
+# fixes mapview
+mapviewOptions(fgb = FALSE)
+```
+
+## 1 bring HOLC polygons
+```{r}
+
+list.files('input_data/HOLC_shapefile/')
+
+tic(); (holc <- st_read('input_data/HOLC_shapefile/holc_ad_data.shp'
+                        # , as_tibble = TRUE
+                        ) %>% 
+  # filter(!is.na(holc_grade) & holc_grade != 'E') %>% 
+  st_cast('POLYGON') %>% # IMPORTANT
+  filter(!st_is_empty(.)) %>% 
+  st_make_valid(.) %>% 
+  rowid_to_column() %>% 
+  mutate(  id = paste(state, city, holc_id, holc_grade, rowid, sep = '_')
+         , city_state = paste0(city, ', ', state)
+         , area_holc_km2 = as.double(st_area(.) / 1e+6)) %>% 
+  select(id, state, city, holc_id, holc_grade, city_state, area_holc_km2));toc() # < 3 seconds
+
+# holc |> st_write(dsn = paste0(getwd(), '/int_data/holc_poly_refined/holc_poly_refined.shp'))
+
+holc_test <- st_read('/Users/dlocke/_students/Diego/int_data/holc_poly_refined/holc_poly_refined.shp')
+
+# check uniqueness of IDs
+all.equal(n_distinct(holc$id), dim(holc)[1])
+
+# # double check a few places
+# holc %>%
+#   # filter(state == 'MA') %>%
+#   # filter(state == 'RI') %>%
+#   # filter(state == 'NY') %>% 
+#   filter(state == 'CA') %>% 
+#   mapview(zcol =   'holc_grade'
+#           , col.regions = holc_pal)
+
+```
+
+### A double checks, EDA (sort of), find states to import
+```{r}
+
+# are there sates without holc polys?
+(
+fips_codes %>% distinct(state, state_name) %>% 
+  left_join(., 
+            holc %>% 
+              st_drop_geometry() %>%
+              tabyl(state) %>%
+              tibble()
+            , by = 'state'
+            ) -> holc_by_state
+)
+
+holc_by_state %>% filter(is.na(n)) # states without data, drop these from CBG and MSA?
+
+# test for holc polys that cross states.
+states <- tidycensus::get_decennial(geography = 'state'
+                               , variable = 'P001001' # population, just need something
+                               , year = 2010
+                               # hopefully states have not changed since 2010 :-/
+                               , geometry = TRUE
+                               , output = 'wide'
+                               # , keep_geo_vars = TRUE
+                                  ) %>%
+  arrange(GEOID) %>% 
+  st_transform(., crs = st_crs(holc))
+
+# intersect to find 'broken' polygons straddling across state lines
+# tic(); test_holc_state_int <- holc %>% st_intersection(., states); toc() # ~ 1 min
+
+tic(); test_holc_state_int <- holc %>% 
+  st_parallel(.
+              , st_intersection
+              , n_cores = 5
+              , y = states); toc() # ~15 second
+
+# 32 cross-boundary intersections.. no bueno
+holc %>% dim() - test_holc_state_int %>% dim() 
+
+# find the straddlers
+(test_holc_state_int %>% 
+  st_drop_geometry() %>% 
+  group_by(id) %>% 
+  count() %>% 
+  arrange(id) %>% 
+  filter(n > 1) -> holc_x_state)
+
+# find the states
+(
+  test_holc_state_int %>% 
+    filter(id %in% holc_x_state$id) %>% # the straddlers
+    arrange(id) %>%                     # cosmetic, helps debug
+    select(id, state, NAME) %>%         # keep what we need and no more 
+    distinct(NAME) %>%                  # gets unique list of states
+    left_join(.                         # state vs state_name, lookup to `translate`
+              , fips_codes %>% distinct(state, state_name)
+              , by = c('NAME' = 'state_name')) %>% 
+    rename(state_name = NAME) -> states_with_crosses
+)
+
+# states to include
+(
+  holc_by_state %>% filter(!is.na(n)) %>% # from holc polys
+    select(state, state_name) %>% 
+    bind_rows(., states_with_crosses) %>% # from the state intersections
+    distinct() %>% 
+    arrange(state) -> states_to_query
+)
+
+```
+
+### B misc old, not that interesting EDA
+```{r eval=FALSE, include=FALSE}
+# there are some low-count cities, is that a problem for the biodiversity measures?
+holc %>% 
+  st_drop_geometry() %>% 
+  tabyl(city)
+
+# handsome table
+(
+holc %>% 
+    st_drop_geometry() %>% 
+    tabyl(city_state, holc_grade) %>% 
+    adorn_totals(where = 'col') %>% 
+    tibble() %>% 
+    separate(city_state, sep = ', ', into = c('city', 'state'), remove = FALSE) -> neighs_per_city
+)
+
+
+neighs_per_city %>% 
+  select(-Total) %>% 
+  pivot_longer(c(A:E), names_to = 'holc_grade', values_to = 'counts') %>% 
+  ggplot(aes(counts, reorder(city_state, -counts), fill = holc_grade)) + 
+  scale_fill_manual(values = holc_pal_f) + 
+  geom_col() + 
+  # geofacet::facet_geo(~state, grid = 'us_state_with_DC_PR_grid2') +
+  theme_bw(14) + 
+  theme(axis.text.y = element_text(size = 6))
+
+
+# geofacet by state
+neighs_per_city %>% 
+  mutate(state = ifelse(state == 'Darien', 'CT', state)) %>% 
+  select(-Total) %>% 
+  pivot_longer(c(A:E), names_to = 'holc_grade', values_to = 'counts') %>% 
+  ggplot(aes(counts, reorder(city, -counts), fill = holc_grade)) + 
+  scale_fill_manual(values = holc_pal_f) + 
+  geom_col() + 
+  geofacet::facet_geo(~state, grid = 'us_state_with_DC_PR_grid2', scales = 'free') +
+  theme_bw(14) + 
+  theme(axis.text.y = element_text(size = 6))
+
+
+# kind of useless
+holc %>% 
+  st_drop_geometry() %>% 
+  tabyl(city)
+
+# some polygons have funky names
+(holc %>% 
+  st_drop_geometry() %>% 
+  tabyl(holc_id) %>% 
+  tibble() %>% 
+  arrange(desc(n)) -> holc_ids); tail(holc_ids)
+
+holc %>% 
+  st_drop_geometry() %>% 
+  tabyl(holc_grade)
+
+holc %>% filter(holc_id == '80R')
+```
+
+
+## 2 bring in MSA
+```{r}
+# v19 <- load_variables(2019, "acs5", cache = TRUE)
+# View(v19)
+
+# https://walker-data.com/tidycensus/articles/basic-usage.html
+msa <- get_acs(geography = 
+                 "metropolitan statistical area/micropolitan statistical area"
+               # , state = states_to_query$state
+               # population - just need some variable
+               , variables = c('pop' = 'B01001_001') 
+               # add income and/or racial composition?
+               , year = 2019
+               , geometry = TRUE
+               , output = 'wide'
+               , moe_level = 95
+               ) %>% 
+  rename(msa_GEOID = GEOID) %>% 
+  st_make_valid() %>% 
+  st_transform(crs = st_crs(holc)) %>%
+  mutate(area_msa_km2 = as.double(st_area(.) / 1e+6)) %>% 
+  separate(NAME, into = c('place', 'rest'), sep = ', ', remove = FALSE) %>% 
+  separate(rest, into = c('states', 'type'), sep = '\\s') %>% 
+  separate(states, into = c('s1', 's2', 's3', 's4')) %>% 
+  filter(
+    s1 %in% states_to_query$state | 
+    s2 %in% states_to_query$state | 
+    s3 %in% states_to_query$state | 
+    s4 %in% states_to_query$state
+    ) |> 
+   rename(msa_name = NAME)
+
+
+# bring in table-only (when we intersect file above, we don't need all of the extra columns)
+msa_tbl_vars <- get_acs(geography = 
+                 "metropolitan statistical area/micropolitan statistical area"
+               # population - just need some variable
+               , variables = c(# 'pop' = 'B01001_001'
+                               'medhhinc' = 'B19013_001'
+                               , 'total_pop' = 'B02001_001'
+                               , 'White alone' = 'B02001_002'
+                               , 'Black or African American alone' = 'B02001_003'
+                               , 'American Indian and Alaska Native alone' = 'B02001_004'
+                               , 'Asian alone' = 'B02001_005'
+                               , 'Native Hawaiian and Other Pacific Islander alone' = 'B02001_006'
+                               , 'Some other race alone' = 'B02001_007'
+                               , 'Two or more races' = 'B02001_008'
+# B02001_009	Two or more races:!!Two races including Some other race	RACE
+# B02001_010	Two or more races:!!Two races excluding Some other race, and three or more races
+                               ) 
+               # add income and/or racial composition?
+               , year = 2019
+               , geometry = FALSE
+               , output = 'wide'
+               , moe_level = 95
+               ) %>% 
+  rename_all(~paste0('msa_', .))
+
+# TODO do we care?
+dim(msa); msa %>% st_cast('POLYGON') %>% dim()
+
+# mapview::mapview(msa, col.regions = 'NA') +
+#   mapview::mapview(holc, zcol = 'holc_grade', col.regions = holc_pal_f)
+
+```
+
+### A find HOLC polygons that cross MSA lines, fix assignment
+```{r}
+
+# # intersect to find 'broken' polygons straddling across urban area lines
+# tic(); test_holc_msa_int <- st_parallel(holc
+#                                         , st_intersection
+#                                         , n_cores = 10
+#                                         , y = msa); toc() # ~2.5 mins w 10 core
+# 
+# # 8 cross-boundary intersections.. no bueno
+# holc %>% dim() - test_holc_msa_int %>% dim()
+# 
+# # find the straddlers
+# (test_holc_msa_int %>%
+#   st_drop_geometry() %>%
+#   group_by(id) %>%
+#   count() %>%
+#   arrange(id) %>%
+#   filter(n > 1) %>%
+#   mutate(state = str_sub(id, 1,2)) -> holc_x_msa)
+# 
+# unique(holc_x_msa$state) # CT, IA, NH, OH, RI!
+# 
+# # msa's of the
+# (crossed_msa <- test_holc_msa_int %>%
+#                filter(id %in% holc_x_msa$id) %>%
+#                distinct(msa_GEOID) %>%
+#                pull())
+# 
+# # where are they?
+# # manual re-assignments with holc_x_msa polygons
+#   mapview(
+#     msa %>% filter(msa_GEOID %in% crossed_msa)
+#     ) +
+# test_holc_msa_int %>% filter(id %in% holc_x_msa$id) %>%
+#   mapview(., zcol = 'holc_grade', col.regions = holc_pal)
+# 
+# 
+# 
+# test_holc_msa_int %>% #mapview()
+#   st_drop_geometry() %>%
+#   select(id, msa_GEOID) %>%
+#   # filter(id %in% holc_x_msa$id) %>% # used for testing
+#   arrange(id) %>%
+#   filter(
+#     !(id == 'CT_Waterbury_C2_C_1385'  & msa_GEOID == '45860') & # 35300 keep
+#     !(id == 'CT_Waterbury_C2_C_1386'  & msa_GEOID == '45860') & # 35300 keep
+#     !(id == 'CT_Waterbury_C7_C_1391'  & msa_GEOID == '45860') & # 35300 keep
+#     !(id == 'IA_Dubuque_D1_D_1976'    & msa_GEOID == '38420') & # 20220 keep
+#     !(id == 'NH_Manchester_B1_B_5377' & msa_GEOID == '18180') & # 413035 keep
+#     !(id == 'OH_Toledo_C1_C_7632'     & msa_GEOID == '33780') & # 45780 keep
+#     !(id == 'OH_Toledo_C10_C_7633'    & msa_GEOID == '33780') & # 45780 keep
+#     !(id == 'OH_Toledo_C2_C_7643'     & msa_GEOID == '33780') & # 45780 keep
+#     !(id == 'RI_Woonsocket_C4_C_8579' & msa_GEOID == '14460')   # 39300 keep
+#   ) %>% tibble -> holc_msa_keys
+# 
+# holc_msa_keys |>
+#   write_csv(paste0('int_data/holc_msa_keys/holc_msa_keys_',
+#                    gsub('[[:punct:]]', '-', Sys.time()),
+#                    '.csv'))
+
+(holc_msa_keys <- read_csv('int_data/holc_msa_keys/holc_msa_keys_2022-01-02 20-02-13.csv', col_types = 'cc')) # makes type = character
+
+# # hand the cleaned up assignment over to holc: don't commit yet
+# holc %>%
+#   left_join(., holc_msa_keys, by = 'id') %>%
+#   left_join(., msa_tbl_vars, by = 'msa_GEOID')
+
+```
+
+
+## 3 clean up a little
+```{r eval=FALSE, include=FALSE}
+
+# what is big?
+for(obj in ls()){message(obj); print(object.size(get(obj)), units='auto'); cat('\n')}; rm(obj)
+
+rm(test_holc_msa_int)
+rm(test_holc_state_int)
+
+
+for(obj in ls()){message(obj); print(object.size(get(obj)), units='auto'); cat('\n')}; rm(obj)
+
+# gc()
+```
+
+
+## 4 read in CBG polygons
+### A multiparts: extract / examine
+```{r}
+
+# create data path (DHL erased water area from all CBG's in another project)
+data_path <- '/Users/dlocke/Diversity_Inclusion_USDA_FS_HR/data/National_Census_Block_Groups_ACS_2013-2017_NO_WATER/'
+
+(files     <- dir(data_path, recursive = TRUE, pattern = "*.shp")); files # get file names
+
+# read in block groups (with water erased) state and stack them all together
+tic(); (cbg_ply_no_water <- tibble(filename = files) %>%
+          mutate(state = str_sub(filename, 11, 12)) %>% # pull state out of filename
+          filter(state %in% states_to_query$state) %>%  # to filter just cbgs w HOLC
+          mutate(file_contents = map(filename, ~ st_read(file.path(data_path, .), 
+                                                         quiet = TRUE))) %>%
+          select(-state) |> # drop state,  file_contents already has state
+          unnest(cols = file_contents) %>%
+          st_as_sf() %>%
+          select(cbg_GEOID = GEOID, state, county, area_cbg_km2 = ar_cb_2) |> 
+          st_transform(., crs = st_crs(holc))); toc() # < 90 secs
+
+# # test for multiparts (even though we know we have them)
+# tic(); cbg_ply_no_water %>% 
+#   st_cast('POLYGON') -> cbg_ply_no_water_exploded_test; toc() # ~20 seconds
+# 
+# # are there multies?
+# dim(cbg_ply_no_water)[1] - dim(cbg_ply_no_water_exploded_test)[1] # yes
+# 
+# 
+# # which cbg's are they?
+# (cbg_ply_no_water_exploded_test %>%
+#     st_drop_geometry() %>% 
+#     group_by(cbg_GEOID) %>% 
+#     tally(sort = TRUE) %>% 
+#     filter(n > 1) -> cbg_ply_no_water_exploded_ids_counts)
+# 
+# rm(cbg_ply_no_water_exploded_test)
+# 
+# cbg_ply_no_water_exploded_ids_counts %>% tail()
+
+# # Viz
+# cbg_ply_no_water_exploded_ids_counts %>% ggplot(aes(n)) + geom_histogram(binwidth = 1)
+
+# # map multiparts
+# cbg_ply_no_water %>%
+#   filter(cbg_GEOID %in% cbg_ply_no_water_exploded_ids_counts$cbg_GEOID) %>%
+#   mapview()
+
+
+```
+
+
+### B multiparts: fix
+```{r}
+
+sf_use_s2(FALSE)
+
+# could be more efficient?
+tic(); (cbg_ply_no_water %>%
+          st_cast('POLYGON') %>%
+          mutate(  area_single_km2   = as.double(st_area(.) / 1e+6)
+                 , area_multi_prop   = (area_single_km2 / area_cbg_km2)
+                 , area_weighted_km2 = (area_cbg_km2 * area_multi_prop)) %>%
+          select(cbg_GEOID : county, starts_with('area_')) %>% # cosmetic reordering
+          # drop slivers
+          filter(!is.na(area_multi_prop)) -> cbg_ply_no_water_exploded
+        ); toc(); beep() # ~ 90 seconds
+
+# double checks
+# how is the proportion behaving?
+cbg_ply_no_water_exploded %>%
+  ggplot(aes(area_multi_prop)) +
+  geom_density() +
+  # geom_histogram(binwidth = .01) +
+  NULL
+
+cbg_ply_no_water_exploded$area_multi_prop %>% summary()
+
+
+# do the pieces add back up?
+(cbg_ply_no_water_exploded %>%
+    st_drop_geometry() %>%
+    group_by(cbg_GEOID) %>%
+    summarise(sum_prop = sum(area_multi_prop)) %>%
+    arrange(desc(sum_prop)) -> sum_prop_check)
+
+sum_prop_check %>% tail()
+sum_prop_check %>% summary()
+# 
+# # write out
+# cbg_ply_no_water_exploded |>
+#   st_write(dsn =
+#              paste0('int_data/cbg_ply_no_water_exploded/cbg_ply_no_water_exploded_',
+#                     gsub('[[:punct:]]', '-', Sys.time()), '.shp')
+#            )
+
+# # read in
+# tic(); st_read('int_data/cbg_ply_no_water_exploded/cbg_ply_no_water_exploded_2022-03-12 16-48-13.shp') |>
+#   rename(
+#       cbg_GEOID = c_GEOID
+#     , area_cbg_km2 = ar_cb_2
+#     , area_single_km2 = ar_sn_2
+#     , area_multi_prop = ar_mlt_
+#     , area_weighted_km2 = ar_wg_2) -> cbg_ply_no_water_exploded_test; toc() # ~25 seconds
+
+# TODO why are there multiparts (still?)
+```
+
+
+### C link / filter CBGs to / by MSA's
+```{r}
+
+# get MSA's with holc polys
+msa_w_holc <- msa |>
+  filter(msa_GEOID %in% unique(holc_msa_keys$msa_GEOID)) |>
+  select(msa_GEOID)
+
+# # turn cbgs into centroids for faster intersection with MSA's
+# # also avoids edges that don't match up perfectly
+# tic(); cbg_ply_no_water |> # NOTE we are using multipart version
+#   select(cbg_GEOID) |>
+#   st_centroid(of_largest_polygon = TRUE) -> cbg_pt; toc() # ~70 secs 
+#                                                           # (~20 seconds with singles)
+# 
+# # intersect cbg points with MSAs
+# tic(); st_intersection(cbg_pt, msa_w_holc) -> cbg_pt_msa_int; toc() # ~90 seconds
+#                                                          # (~3.5 mins with singles)
+# 
+# # write out
+# cbg_pt_msa_int |>
+#   st_write(dsn = paste0('int_data/cbg_pt_msa_int/cbg_pt_msa_int_',
+#                         gsub('[[:punct:]]', '-', Sys.time()), '.shp')
+#            )
+
+# read in
+tic(); (cbg_pt_msa_int <- st_read('int_data/cbg_pt_msa_int/cbg_pt_msa_int_2022-01-02 21-02-00.shp'
+                                  , as_tibble = TRUE)); toc()
+
+cbgs_msa_lookup <- cbg_pt_msa_int |> st_drop_geometry() # drop spatial
+
+# # use filtering joint to select CBGs in MSAs and write out.
+# tic(); (cbg_ply_no_water_exploded |>
+#           right_join(cbgs_msa_lookup
+#                      , by = 'cbg_GEOID') |>
+#           left_join(msa |> st_drop_geometry() |> select(msa_GEOID, msa_name) # get name
+#                     , by = 'msa_GEOID') |>
+#           st_write(dsn = paste0('int_data/cbgs_in_msa/cbgs_in_msa_',
+#                                 gsub('[[:punct:]]', '-', Sys.time()), '.shp'))); toc()
+
+(cbgs_in_msa <- st_read('int_data/cbgs_in_msa/cbgs_in_msa_2022-01-03 06-40-20.shp'
+                        , as_tibble = TRUE
+                        ) |> 
+  rename(
+      cbg_GEOID = c_GEOID
+    , area_cbg_km2 = ar_cb_2
+    , area_single_km2 = ar_sn_2
+    , area_multi_prop = ar_mlt_
+    , area_weighted_km2 = ar_wg_2
+    , msa_GEOID = m_GEOID
+    , msa_name = msa_nam
+    ))
+
+# # look around (old double checks)
+# cbgs_in_msa |> filter(state == 'WA') |> mapview() +
+#   mapview(msa_w_holc)  +
+# #   mapview(cbg_pt_msa_int |> filter(msa_GEOID == 13820))
+
+```
+
+
+### D tabular CBG data
+#### i read in, filter down income and race / ethnicity (r/e)
+```{r}
+# the lowest-level race/ethnicity categories that sum up to categories and super-categories
+to_drop <- c(
+  'B03002_001' # Estimate Total
+  , 'B03002_002' # Not Hispanic or Latino
+  , 'B03002_010' # Not Hispanic or Latino Two or more races Two races including Some other race
+  , 'B03002_011' # Not Hispanic or Latino Two or more races Two races excluding Some other race and three or more races
+  , 'B03002_012' # Hispanic or Latino
+  , 'B03002_020' # Hispanic or Latino Two or more races Two races including Some other race
+  , 'B03002_021' # Hispanic or Latino Two or more races Two races excluding Some other race and three or more races
+)
+
+# lookup table for variable / label combo
+(
+  var_tab <- read_csv('/Users/dlocke/Diversity_Inclusion_USDA_FS_HR//data/National_Census_Block_Groups_ACS_2013-2017/race_by_hispanic_B03002_meta.csv') |> 
+    distinct(variable, .keep_all = TRUE) |> # ditch moe
+    filter(variable %nin% to_drop) |>       # filter down r/e categories, no need for sub-totals
+    select(variable, label_census) |>       # keep just key and r/e category labels
+    add_row(variable = 'B19013_001', label_census = 'Median Household Income') # adds income
+  )
+
+# # query the Census API
+# tic(); ( # takes ~4.5 minutes
+#   cbg_tbl_re_inc <- get_acs(
+#       # state = 'RI' # used for testing
+#       state = states_to_query
+#     , geography = 'block group'
+#     , variables = c('B19013_001', var_tab$variable) # income + r/e
+#     , year = 2019
+#     , output = 'tidy'
+#     , geometry = FALSE
+#     , keep_geo_vars = FALSE
+#     , moe_level = 95
+#     ) |> 
+#     select(-NAME) |> 
+#     rename(cbg_GEOID = GEOID) |> 
+#     right_join(cbgs_msa_lookup, by = 'cbg_GEOID') |>  # filter cbgs to those in MSA's w HOLC
+#     right_join(var_tab, by = 'variable') |>           # and add text labels
+#     relocate(msa_GEOID, .after = last_col())          # cosmetic: cbg then msa vars
+#  ); toc()
+# 
+# # write it out
+# cbg_tbl_re_inc |> 
+#   write_csv(paste0('int_data/cbg_tbl_re_inc/cbg_tbl_re_inc_',
+#                    gsub('[[:punct:]]', '-', Sys.time()), '.csv'))
+
+# read in
+(cbg_tbl_re_inc <- read_csv('int_data/cbg_tbl_re_inc/cbg_tbl_re_inc_2022-01-03 15-58-34.csv'
+                            , col_types = list(msa_GEOID = col_character())))
+```
+
+##### a income
+```{r}
+
+# pull out income from income/race table
+# why is everything double?
+(cbg_tbl_re_inc |> # head(20)
+  filter(label_census == 'Median Household Income') |>
+  select(cbg_GEOID, msa_GEOID,
+         'eMedian Household Income' = estimate, 'mMedian Household Income' = moe) |> 
+  distinct(cbg_GEOID, msa_GEOID, .keep_all = TRUE) -> cbg_tbl_inc)
+
+
+# # viz
+# # calc mean first
+# vline <- mean(cbg_tbl_inc$`eMedian Household Income`, na.rm = TRUE)
+# cbg_tbl_inc |> 
+#   ggplot(aes(`eMedian Household Income`)) + 
+#   geom_density() + 
+#   geom_vline(xintercept = vline) + 
+#   theme_bw() + 
+#   NULL
+# 
+# # facet by MSA, clean up the labels some first
+# remove <- c(' Metro Area', ' Micro Area')
+# 
+# cbg_tbl_inc |>
+#   left_join(msa_tbl_vars |> select(msa_GEOID, msa_NAME), by = 'msa_GEOID') |>
+#   mutate(MSA = str_wrap(str_remove(msa_NAME, paste(remove, collapse = '|')), 20)) |> # tabyl(MSA)
+#   ggplot(aes(`eMedian Household Income`)) +
+#   geom_density() +
+#   geom_vline(xintercept = vline, color = 'dark gray') +
+#   theme_bw(7) +
+#   facet_wrap(~MSA) +
+#   theme(axis.text.x = element_text(angle = 90)) +
+#   scale_x_continuous(labels = scales::dollar_format()) +
+#   NULL -> msa_inc_dist
+
+
+# calculate Gini coefficeint for each MSA
+# https://cran.r-project.org/web/packages/dineq/dineq.pdf
+msa_gini_decomp <- gini_decomp(x = cbg_tbl_inc$`eMedian Household Income`
+                               , z = cbg_tbl_inc$msa_GEOID)
+
+msa_gini_decomp$gini_decomp # more between than within inequality
+
+(msa_gini_decomp$gini_group$gini_group |> 
+    data.frame() |> rownames_to_column(var = 'msa_GEOID') |>
+    tibble() |> 
+    rename(gini =  msa_gini_decomp.gini_group.gini_group) -> msa_gini)
+
+```
+
+##### b race
+```{r}
+
+# pull out r/e from income/race table
+# why is everything double?
+(cbg_tbl_re_inc |> # head(20)
+  filter(label_census != 'Median Household Income') |> 
+  select(-variable, moe_95 = moe) |> 
+  distinct(cbg_GEOID, label_census, .keep_all = TRUE) -> cbg_tbl_re)
+
+# get percentages
+(
+cbg_tbl_re |> 
+  pivot_wider(id_cols = c(cbg_GEOID, msa_GEOID)
+              , names_from = label_census
+              , values_from = estimate) |> # glimpse()
+  mutate(msa_tot_pop = rowSums(across(`Not Hispanic or Latino White alone` : 
+                                  `Hispanic or Latino Two or more races`))) |> 
+  mutate(
+      `msa_p_Not Hispanic or Latino White alone` = 
+        (`Not Hispanic or Latino White alone` / msa_tot_pop)*100
+    , `msa_p_Not Hispanic or Latino Black or African American alone` =
+      (`Not Hispanic or Latino Black or African American alone` / msa_tot_pop)*100
+    , `msa_p_Not Hispanic or Latino American Indian and Alaska Native alone` = 
+      (`Not Hispanic or Latino American Indian and Alaska Native alone` / msa_tot_pop)*100
+    , `msa_p_Not Hispanic or Latino Asian alone` = 
+      (`Not Hispanic or Latino Asian alone` / msa_tot_pop)*100
+    , `msa_p_Not Hispanic or Latino Native Hawaiian and Other Pacific Islander alone` = 
+      (`Not Hispanic or Latino Native Hawaiian and Other Pacific Islander alone` / msa_tot_pop)*100
+    , `msa_p_Not Hispanic or Latino Some other race alone` = 
+      (`Not Hispanic or Latino Some other race alone` / msa_tot_pop)*100
+    , `msa_p_Not Hispanic or Latino Two or more races` = 
+      (`Not Hispanic or Latino Two or more races` / msa_tot_pop)*100
+    , `msa_p_Hispanic or Latino White alone` = 
+      (`Hispanic or Latino White alone` / msa_tot_pop)*100
+    , `msa_p_Hispanic or Latino Black or African American alone` = 
+      (`Hispanic or Latino Black or African American alone` / msa_tot_pop)*100
+    , `msa_p_Hispanic or Latino American Indian and Alaska Native alone` = 
+      (`Hispanic or Latino American Indian and Alaska Native alone` / msa_tot_pop)*100
+    , `msa_p_Hispanic or Latino Asian alone` = 
+      (`Hispanic or Latino Asian alone` / msa_tot_pop)*100
+    , `msa_p_Hispanic or Latino Native Hawaiian and Other Pacific Islander alone` =
+      (`Hispanic or Latino Native Hawaiian and Other Pacific Islander alone` / msa_tot_pop)*100
+    , `msa_p_Hispanic or Latino Some other race alone` = 
+      (`Hispanic or Latino Some other race alone` / msa_tot_pop)*100
+    , `msa_p_Hispanic or Latino Two or more races` =
+      (`Hispanic or Latino Two or more races` / msa_tot_pop)*100
+  ) |> 
+  select(cbg_GEOID, starts_with('msa_')) -> cbg_tbl_re_p
+)
+
+
+# calculate segregation indices 
+# # https://elbersb.github.io/segregation/articles/segregation.html
+# schools00
+# (within <- mutual_within(schools00, "race", "school",
+#                          within = "state", weight = "n", wide = TRUE))
+# #>    state         M         p         H ent_ratio
+# #> 1:     A 0.4085965 0.2768819 0.4969216 0.8092501
+# #> 2:     B 0.2549959 0.4035425 0.2680884 0.9361190
+# #> 3:     C 0.3450221 0.3195756 0.3611257 0.9402955
+# 
+# cbg_tbl_re
+# 
+# # race = label_census
+# # school = cbg_GEOID
+# # state = msa_GEOID
+# # n = estimate
+# (msa_within_m <- mutual_within(cbg_tbl_re, 'label_census', 'cbg_GEOID',
+#                                within = 'msa_GEOID', weight = 'estimate', wide = TRUE) |>
+#     tibble() |>
+#     mutate(msa_GEOID = as.character(msa_GEOID)) |>
+#     rename(  msa_M = M
+#            , msa_p = p
+#            , msa_H = H
+#            , msa_ent_ratio = ent_ratio) |>
+#        arrange(desc(msa_M))
+#   )
+# 
+# msa_within_m |>
+#   write_csv(paste0('int_data/msa_within_m/msa_within_m_',
+#                    gsub('[[:punct:]]', '-', Sys.time()),
+#                    '.csv'))
+
+# this is sorted descending by M
+(msa_within_m <- read_csv('int_data/msa_within_m/msa_within_m_2022-01-05 11-14-26.csv'
+                          , col_types = list(msa_GEOID = col_character())))
+
+# begin to look!
+msa_within_m |> tail()
+
+# # relationship between M and H
+# msa_within_m |> 
+#   ggplot(aes(msa_H, msa_M)) + 
+#   geom_point()
+
+# # who's most responsible for the segregation? (hint: big cities)
+# msa_within_m |>
+#   left_join(msa_tbl_vars |>
+#               select(msa_GEOID, msa_name = msa_NAME)
+#             , by = 'msa_GEOID') |>
+#   ggplot(aes(msa_p, reorder(msa_name, -msa_p))) +
+#   geom_col() +
+#   theme_bw(10)
+
+```
+
+
+### E get modern demos into HOLC polygons
+```{r}
+
+# intersect holc with cbgs
+sf_use_s2(FALSE)
+
+# # strip down to just the bare necesities for improved performance
+# holc |> select(id) |> st_buffer(0) -> holc_minimal
+# 
+# # int receptacle
+# msa_level_cbg_holc_ints <- rep(list(data.frame(msa_GEOID = NA_character_)),0)
+# 
+# # loop through (st_intersection hangs when attempted all at once)
+# tic(); for(i in unique(cbgs_in_msa$msa_GEOID)){
+#   print(i)
+#   cbgs_in_msa |> 
+#     filter(msa_GEOID == i) |> 
+#     st_buffer(0) -> temp_cbg
+#   
+#   st_intersection(temp_cbg, holc_minimal) -> msa_level_cbg_holc_ints[[i]]
+#   }; toc() # ~2 mins could parallelize, but its super good enough
+# 
+# # take a look
+# msa_level_cbg_holc_ints[[1]]
+# msa_level_cbg_holc_ints[[10]] |> mapview()
+# msa_level_cbg_holc_ints$`35620` |> # New York
+#     left_join(holc |> 
+#               st_drop_geometry() |> 
+#               select(id, holc_grade)
+#             , by = 'id') |> 
+#   mapview(zcol = 'holc_grade', col.regions = holc_pal_f[1:5])
+# 
+# msa_level_cbg_holc_ints[[144]] # good, blank
+# msa_level_cbg_holc_ints[[143]]
+# msa_level_cbg_holc_ints$`12580` |> # Baltimore
+#   left_join(holc |> 
+#               st_drop_geometry() |> 
+#               select(id, holc_grade)
+#             , by = 'id') |> 
+#   mapview(zcol = 'holc_grade', col.regions = holc_pal)
+# 
+# 
+# msa_level_cbg_holc_ints$`31080` |> # Los Angeles
+#   left_join(holc |> 
+#               st_drop_geometry() |> 
+#               select(id, holc_grade)
+#             , by = 'id') |> 
+#   mapview(zcol = 'holc_grade', col.regions = holc_pal)
+# msa_level_cbg_holc_ints$`16980` |> # Chicago
+#   left_join(holc |> 
+#               st_drop_geometry() |> 
+#               select(id, holc_grade)
+#             , by = 'id') |> 
+#   mapview(zcol = 'holc_grade', col.regions = holc_pal)
+
+# # stack and weight
+# msa_level_cbg_holc_ints |> 
+#   bind_rows() %>% # stacks into one
+#   mutate(int_area_km2 = as.double(st_area(.) / 1e+6))  %>% # get intersecting area
+#     st_drop_geometry() %>%                                  # drop weight
+#     group_by(cbg_GEOID, id) %>%
+#     summarise( sum_area_km2 = sum(area_weighted_km2) # area_weighted_km2
+#                , prop_in = int_area_km2 / sum_area_km2) -> int_stacked
+# 
+# # double check the intersections: yaay, looks GREAT
+# int_stacked |> 
+#   ggplot(aes(prop_in)) +
+#   geom_density()
+# 
+# # group the cbg pieces into the hold polygons, write out
+# cbg_tbl_re |> 
+#   select(-msa_GEOID) |> 
+#   right_join(int_stacked, by = 'cbg_GEOID') |> 
+#   mutate(  w_estimate = estimate * prop_in
+#          , w_moe_95   = moe_95   * prop_in) %>%
+#   group_by(id, label_census) %>%
+#   summarize(sum_est = sum(w_estimate)
+#             , sum_moe95 = moe_sum(moe = w_moe_95, estimate = w_estimate)) %>%
+#   ungroup() |> 
+#   write_csv(paste0('int_data/holc_census/holc_census_',
+#                    gsub('[[:punct:]]', '-', Sys.time()),
+#                    '.csv'))
+
+# read in
+(holc_census <- read_csv('int_data/holc_census/holc_census_2022-01-05 11-30-24.csv'))
+
+# get percentages
+(
+holc_census |> 
+  pivot_wider(id_cols = id
+              , names_from = label_census
+              , values_from = sum_est) |> # glimpse()
+  mutate(holc_tot_pop = rowSums(across(`Not Hispanic or Latino White alone` : 
+                                  `Hispanic or Latino Two or more races`))) |> 
+  mutate(
+      `holc_p_Not Hispanic or Latino White alone` = 
+        (`Not Hispanic or Latino White alone` / holc_tot_pop)*100
+    , `holc_p_Not Hispanic or Latino Black or African American alone` =
+      (`Not Hispanic or Latino Black or African American alone` / holc_tot_pop)*100
+    , `holc_p_Not Hispanic or Latino American Indian and Alaska Native alone` = 
+      (`Not Hispanic or Latino American Indian and Alaska Native alone` / holc_tot_pop)*100
+    , `holc_p_Not Hispanic or Latino Asian alone` = 
+      (`Not Hispanic or Latino Asian alone` / holc_tot_pop)*100
+    , `holc_p_Not Hispanic or Latino Native Hawaiian and Other Pacific Islander alone` = 
+      (`Not Hispanic or Latino Native Hawaiian and Other Pacific Islander alone` / holc_tot_pop)*100
+    , `holc_p_Not Hispanic or Latino Some other race alone` = 
+      (`Not Hispanic or Latino Some other race alone` / holc_tot_pop)*100
+    , `holc_p_Not Hispanic or Latino Two or more races` = 
+      (`Not Hispanic or Latino Two or more races` / holc_tot_pop)*100
+    , `holc_p_Hispanic or Latino White alone` = 
+      (`Hispanic or Latino White alone` / holc_tot_pop)*100
+    , `holc_p_Hispanic or Latino Black or African American alone` = 
+      (`Hispanic or Latino Black or African American alone` / holc_tot_pop)*100
+    , `holc_p_Hispanic or Latino American Indian and Alaska Native alone` = 
+      (`Hispanic or Latino American Indian and Alaska Native alone` / holc_tot_pop)*100
+    , `holc_p_Hispanic or Latino Asian alone` = 
+      (`Hispanic or Latino Asian alone` / holc_tot_pop)*100
+    , `holc_p_Hispanic or Latino Native Hawaiian and Other Pacific Islander alone` =
+      (`Hispanic or Latino Native Hawaiian and Other Pacific Islander alone` / holc_tot_pop)*100
+    , `holc_p_Hispanic or Latino Some other race alone` = 
+      (`Hispanic or Latino Some other race alone` / holc_tot_pop)*100
+    , `holc_p_Hispanic or Latino Two or more races` =
+      (`Hispanic or Latino Two or more races` / holc_tot_pop)*100
+  ) |> 
+  select(id, starts_with('holc_')) -> holc_tbl_re_p
+)
+
+# is the modern percent r / e within HOLC table the same length as HOLC polys?
+holc |> dim(); holc_tbl_re_p |> dim() # NO! oook, why?
+holc |> anti_join(holc_tbl_re_p) |> filter(city_state == 'Queens, NY') |> mapview()
+holc |> anti_join(holc_tbl_re_p) |> filter(city_state == 'Baltimore, MD') |> mapview()
+holc |> anti_join(holc_tbl_re_p) |> filter(city_state == 'Little Rock, AR') |> mapview()
+# seem fine to ignore: industrial areas, water, etc. not populated.
+
+
+# calculate segregation indices
+# LOCAL segregation
+# > mutual_local(schools00, "race", "school", weight = "n", wide = TRUE)
+#       school        ls            p
+#    1:   A1_1 0.1826710 0.0004522985
+#    2:   A1_2 0.1825592 0.0004978701
+#    3:   A1_3 0.2756157 0.0006642066
+#    4:   A1_4 0.1368034 0.0005685061
+#    5:   A2_1 0.3585546 0.0004260948
+#   ---                              
+# 2041: C165_1 0.3174930 0.0004568556
+# 2042: C165_2 0.3835477 0.0005297702
+# 2043: C165_3 0.2972550 0.0005650883
+# 2044: C166_1 0.3072281 0.0011586588
+# 2045: C167_1 0.3166498 0.0005354667
+# 
+# holc_cenus
+# 
+# # race = label_census
+# # school = id
+# # n = sum_est
+
+holc_census |> View()
+
+(
+  holc_local_seg <- mutual_local(holc_census |> 
+                                   mutate(sum_est = as.integer(floor(sum_est))) # 'round down'
+                               , 'label_census', 'id', weight = 'sum_est', wide = TRUE) |> 
+    # good warning, dropping NAs
+    tibble() %>%
+    rename_all(~paste0('holc_', .)) |> 
+    arrange(desc(holc_ls)) # where is most segregated?
+  )
+
+# least segregated HOLC polygons today
+holc_local_seg |> tail()
+
+# # local by state, grade, etc
+# (holc_ls_2_graph <- holc_local_seg |>
+#   left_join(holc |>
+#               st_drop_geometry() |>
+#               select(holc_id = id, state, city, holc_grade)
+#             , by = 'holc_id'))
+# 
+# holc_ls_2_graph |>
+#   ggplot(aes(holc_ls, reorder(state, -holc_ls))) +
+#   geom_boxplot() +
+#   theme_bw(16) +
+#   NULL
+# 
+# # cities by state
+# holc_ls_2_graph |> 
+#   ggplot(aes(holc_ls, reorder(city, -holc_ls))) +
+#   geom_boxplot() + 
+#   theme_bw() + 
+#   facet_wrap(~state, scales = 'free_y') + 
+#   NULL
+#   
+# # local seg by grade
+# holc_ls_2_graph |> 
+#   ggplot(aes(holc_ls, holc_grade, fill = holc_grade)) + 
+#   geom_boxplot() + 
+#   scale_fill_manual(values = holc_pal_f) +
+#   theme_bw() + 
+#   NULL
+# 
+# 
+# # local seg by grade and state
+# holc_ls_2_graph |>
+#   # mutate(state_grade = paste0(state, '_', holc_grade)) |>
+#   ggplot(aes(holc_ls, holc_grade, fill = holc_grade)) +
+#   geom_boxplot() +
+#   scale_fill_manual(values = holc_pal_f) +
+#   theme_bw() +
+#   facet_wrap(~state, scales = 'free_y') +
+#   NULL
+# 
+# 
+# # local seg by grade and city
+# holc_ls_2_graph |> 
+#   # mutate(state_grade = paste0(state, '_', holc_grade)) |>  
+#   ggplot(aes(holc_ls, holc_grade, fill = holc_grade)) + 
+#   geom_boxplot() + 
+#   scale_fill_manual(values = holc_pal_f) +
+#   theme_bw() + 
+#   facet_wrap(~city, scales = 'free_y') + 
+#   NULL
+
+```
+
+
+## old no read in bird biodiversity
+```{r eval=FALSE, include=FALSE}
+
+(
+  birds <- read_csv('input_data/bird_completeness_HOLC_cities_2022.csv') %>% 
+    select(-'...1', holc_id = Area, Records: Ratio, city = City, holc_grade) 
+  )
+
+# outcomes of interest
+# 1. bird density = (records / area)
+# 2. species richness (Observed.richness)
+# 3. completeness
+# 
+# holc_id           <chr> "A1", "A10", "A11", "A2", "A3", "A4", "A5"…
+# Records           Number of observations
+# Observed.richness observed number of unique species
+# Richness          expected species richness based on sp accum curve based on slope, complet, ratio
+# Slope             slope of species accumulation curve
+# Completeness      how complete do we think the survey is? (helps identified high and low representive)
+# Ratio             ??
+# city              <chr> "Akron", "Akron", "Akron", "Akron", "Akron…
+# holc_grade    
+
+```
+
+
+
+## 5 pull it all together: combine soc /dem
+```{r}
+
+holc %>% 
+  filter(!st_is_empty(.)) %>%
+  # right_join(birds, by = c('city', 'holc_id')) |> 
+  left_join(holc_local_seg, by = c('id' = 'holc_id')) |> # segregation
+  left_join(holc_tbl_re_p, by = 'id') |>                 # percent race / ethnicity
+  left_join(holc_msa_keys |> distinct(id, .keep_all = TRUE), by = 'id') |> 
+  left_join(msa_within_m, by = 'msa_GEOID') |>
+  left_join(msa_tbl_vars, by = 'msa_GEOID') |>
+  left_join(msa_gini, by = 'msa_GEOID') |> 
+  rename(msa_gini = gini) -> soc_dem_max
+  # select(holc_grade = holc_grade.x, -holc_grade.y, everything()) 
+
+# pull out just the table
+soc_dem_max_tbl <- soc_dem_max |> st_drop_geometry() |> tibble()
+
+# look at that table
+soc_dem_max_tbl |> summary()
+soc_dem_max_tbl |> glimpse()
+
+# # save out: spatial
+# save(soc_dem_max
+#      , file = paste0('int_data/soc_dem/soc_dem_max_singlepart_', Sys.Date(),'.Rdata'))
+# 
+# # save out: table
+# soc_dem_max_tbl |>
+#   write_csv(paste0('int_data/soc_dem/soc_dem_max_singlepart_'
+#                    , str_replace_all(Sys.time(), '[[:punct:]]', '_')
+#                    , '.csv'))
+  
+```
+
+
+
+
+
+
+
+
+=========
+# OLD HOLD BELOW
+
+
+## 7 models?
+```{r}
+
+max_tbl |> 
+  select(id, Records : Ratio) |> 
+  pivot_longer(-id) |> 
+  ggplot(aes(value)) + 
+  geom_density() + 
+  facet_wrap(~name, scales = 'free') + 
+  theme_bw() + 
+  NULL
+
+max_tbl
+
+library(lme4)
+# null model: completeness
+com0 <- lmer(Completeness ~ (1 | msa_GEOID), data = max_tbl)
+# icc(com0)
+
+# random intercept, fixed slope: completeness
+com1 <- lmer(Completeness ~ holc_grade + (1 | msa_GEOID), data = max_tbl)
+com1a <- lmer(Completeness ~ holc_grade + (1 | msa_gini), data = max_tbl)
+
+compare_performance(com1, com1a, rank = TRUE)
+
+# random intercept, random slope: completeness
+com2 <- lmer(Completeness ~ holc_grade + (holc_grade | msa_GEOID), data = max_tbl)
+
+compare_performance(com0, com1, com2, com2b, rank = TRUE)
+
+com2b <- lmer(Completeness ~ 1 + (holc_grade | msa_GEOID), data = max_tbl)
+compare_performance(com0, com1, com2)
+
+```
+
+
+
+## 5 clean up a little?
+```{r eval=FALSE, include=FALSE}
+
+# what is big?
+for(obj in ls()){message(obj); print(object.size(get(obj)), units='auto'); cat('\n')}; rm(obj)
+
+rm(sum_prop_check)
+rm(cbg_ply_no_water_exploded_ids_counts)
+# rm(cbg_ply_no_water)
+
+for(obj in ls()){message(obj); print(object.size(get(obj)), units='auto'); cat('\n')}; rm(obj)
+
+# gc()
+
+```
+
+# furrr
+
+## 2 Urban Areas
+```{r eval=FALSE, include=FALSE}
+v19 <- load_variables(2019, "acs5", cache = TRUE)
+View(v19)
+
+# rappdirs::user_cache_dir("tigris")
+# https://github.com/walkerke/tigris/issues/72
+
+
+
+tic(); (
+ua <- get_acs(geography = "urban area"
+              , variable = c(ua_population = 'B01001_001', # population 
+                             ua_medhhinc = 'B19013_001')   # add other variables? 
+              # calculate racial diveristy and inequality indexes here?
+              , year = 2019
+              , geometry = TRUE
+              , output = 'wide'
+              ) %>% 
+  st_transform(crs = st_crs(holc)) %>%
+  mutate(area_ua_km2 = as.double(st_area(.) / 1e+6)) %>% 
+  separate(NAME, into = c('place', 'rest'), sep = ', ') %>% 
+  separate(rest, into = c('states', 'type'), sep = '\\s') %>% 
+  separate(states, into = c('s1', 's2', 's3', 's4')) %>% 
+  filter(
+    s1 %in% states_to_query$state | 
+    s2 %in% states_to_query$state | 
+    s3 %in% states_to_query$state | 
+    s4 %in% states_to_query$state
+    )); beep(); toc() # ~2 seconds
+
+
+ua %>% 
+
+
+# ^[^\s]+
+# 
+# ua %>% 
+#   st_drop_geometry() %>% 
+#   distinct(states) %>% 
+#   separate(states, into = c('s1', 's2', 's3', 's4')) %>% 
+#   rowid_to_column() %>% 
+#   pivot_longer(-rowid) %>% 
+#   distinct(value)
+#   
+
+
+mapview(holc, zcol = 'holc_grade', col.regions = holc_pal_f) + 
+  mapview(ua, col.regions = 'NA', lwd = 2)
+
+```
+
+### A are there any HOLC polygons that cross UA lines?
+```{r eval=FALSE, include=FALSE}
+
+# intersect to find 'broken' polygons straddling across urban area lines
+ncore <- 5
+tic(); test_ua_int <- st_parallel(holc
+                                  , st_intersection
+                                  , n_cores = ncore
+                                  , y = ua); toc() # ~15 mins
+
+ HERE
+
+holc %>% dim() - test_int %>% dim() # 32 cross-boundary intersections.. no bueno
+
+# find the straddlers
+(test_ua_int %>% 
+  st_drop_geometry() %>% 
+  group_by(id) %>% 
+  count() %>% 
+  arrange(id) %>% 
+  filter(n > 1) -> holc_x_ua) # CT!
+
+ua %>% filter(s1 == 'CT') %>% mapview() + mapview(holc %>% filter(state == 'CT'))
+
+# how many urban areas do we have?
+test_ua_int %>% 
+  distinct(GEOID) -> ua_int_holc_GEOID
+
+# where are they?
+ua %>% filter(GEOID %in% ua_int_holc_GEOID$GEOID) %>% mapview()
+
+
+
+```
+
+
+## 4 intersect HOLC and block groups
+```{r}
+
+
+library(parallel)
+detectCores() # 16, yeah!
+ncore <- 10   #
+
+
+tic(); test <- st_intersection(cbg_ply_no_water_exploded,  # block groups
+            holc); toc(); beep()
+
+
+# MULTICORE
+st_parallel(cbg_ply_no_water_exploded,  # block groups
+            st_intersection,            # sf function that gets parallelized
+            ncore,                      # that's the number of cores
+            y = holc                    # HOLC polygons
+       ) -> test%>%
+  mutate(int_area_km2 = as.double(st_area(.) / 1e+6))  %>% # get intersecting area
+  st_drop_geometry() %>%                                  # drop weight
+  group_by(GEOID, id, time_travel) %>%
+  mutate( sum_area_km2 = sum(area_weighted_km2) # area_weighted_km2
+         , prop_in = int_area_km2 / sum_area_km2) -> temp_int
+
+    # write out
+    temp_int %>%
+      write_csv(., paste0(getwd(), '/data/state_block_group_fractions/',
+                          i, '_block_group_fractions_', Sys.Date(), '.csv'))
+
+    toc() # clock out of the i-th iteration
+```
+
+
+
+# 5 Area-weighted calculations (intersect HOLC polygons with block groups)
+## A get state boundaries and neighbors (aids in looping across neighboring states)
+```{r}
+
+# nice regions state.division
+
+# remotes::install_github("Josiahparry/sfweight")
+# https://gist.github.com/JosiahParry/dcfe18bd22571c7ac7f5b77e5c549797
+
+# load_variables(2010, "sf3", cache = TRUE) %>% View()
+
+(
+  state_neighs <- get_decennial(geography = 'state'
+                                , variable = 'P001001' # population, just need something
+                                , year = 2010
+                                # hopefully states have not changed since 2010 :-/
+                                , geometry = TRUE
+                                # , keep_geo_vars = TRUE
+                                ) %>%
+    arrange(GEOID) %>% # cosmetic
+    rowid_to_column(var = 'nb_join') %>% # bc spdep::poly2nb in sfweight::st_neighbors uses row order
+    mutate(nb = st_contiguity(geometry, queen = TRUE)) %>% # finds neighbors
+    st_drop_geometry() %>%
+    select(nb_join, state_code = GEOID, state_name = NAME, neighbors_nb_join = nb) %>%
+    left_join(., fips_codes %>% distinct(state, state_code), by = 'state_code') %>%
+    relocate(neighbors_nb_join, .after = last_col()) %>% # cosmetic / for sanity
+    unnest(neighbors_nb_join)
+  )
+
+# manually add neighbors:
+# isolate a to-from table of state's of their two-letter codes
+(state_neighs %>%
+    left_join(.,
+              state_neighs %>%
+                select(nb_join, neighbors_state_name = state_name, neighbors_state = state),
+              by = c('neighbors_nb_join' = 'nb_join')) %>%
+    distinct(state, neighbors_state) %>%
+    add_row(state =         c('ME', 'MA', 'WA', 'MT', 'MD', 'NJ', 'MI', 'IL'), # reciprocal links added
+          neighbors_state = c('MA', 'ME', 'MT', 'WA', 'NJ', 'MD', 'IL', 'MI')) %>%
+  arrange(state, neighbors_state) -> state_neighs_tbl
+  )
+
+# double check that the filtering does as intended
+i <- 'MT'
+state_neighs_tbl[which(state_neighs_tbl$state == i),]$neighbors_state
+
+i <- 'ME'
+state_neighs_tbl[which(state_neighs_tbl$state == i),]$neighbors_state
+
+```
+
+
+## B loop over each state and neighbors (in parallel) intersect. Saves out GEOID / prop_in table and weighted demographic data
+```{r eval=FALSE, include=FALSE}
+
+# detectCores() # 16, yeah!
+# ncore <- 10    # 
+# 
+# sf_use_s2(FALSE) # suppresses errors, allows st_erase to run
+# 
+# 
+# # tic(); for(i in state_code_abb$state[1:3]){
+# tic(); for(i in state_code_abb$state){
+#   # i <- 'CA'
+#   # extract neighboring states
+#   neigh_states <- state_neighs_tbl[which(state_neighs_tbl$state == i),]$neighbors_state
+# 
+#   # get state and neighboring state cbgs
+#   cbg_state_neighs_i <- cbg_ply_no_water_exploded %>% 
+#     filter(state == i | state %in% neigh_states) %>% 
+#     select(GEOID, area_weighted_km2) %>% 
+#     st_set_precision(1e6) %>% 
+#     st_make_valid() %>% 
+#     st_buffer(., 0)
+#   
+#   # get ischrones for the ith state
+#   ds_isochrones_state_i <- ds_isochrones %>% 
+#     filter(state == i) %>% 
+#     select(id, time_travel) %>% 
+#     st_set_precision(1e6) %>% 
+#     st_make_valid() %>% 
+#     st_buffer(., 0)
+#   
+#   # print status update
+#   cat('processing', i, 'with its neighbors:', neigh_states, '\n')
+# 
+#   tic() # start timing the intersection (the workhorse)
+#   # # IN SERIES
+#   # tic(); st_intersection(cbg_state_neighs_i
+#   #                 , ds_isochrones_state_i) %>%
+#   # #                   select(id, time)
+#   
+#   
+#   # MULTICORE
+#   st_par(cbg_state_neighs_i,       # filter block groups by state
+#          st_intersection,          # sf function that gets parallelized
+#          ncore,                    # that's the number of cores
+#          y = ds_isochrones_state_i #  iso's by state & neighbors'
+#          ) %>%
+#     mutate(int_area_km2 = as.double(st_area(.) / 1e+6))  %>% # get intersecting area
+#     st_drop_geometry() %>%                                  # drop weight
+#     group_by(GEOID, id, time_travel) %>%
+#     mutate( sum_area_km2 = sum(area_weighted_km2) # area_weighted_km2
+#            , prop_in = int_area_km2 / sum_area_km2) -> temp_int
+# 
+#     # write out
+#     temp_int %>% 
+#       write_csv(., paste0(getwd(), '/data/state_block_group_fractions/',
+#                           i, '_block_group_fractions_', Sys.Date(), '.csv'))
+#     
+#     toc() # clock out of the i-th iteration
+# 
+#     # join up the iso intersections with census to get the demographics
+#     cbg_tbl %>% 
+#       right_join(., temp_int %>% select(GEOID, id, time_travel, prop_in), by = 'GEOID') %>%
+#       mutate(  w_estimate = estimate * prop_in
+#              , w_moe_95   = moe_95   * prop_in) %>%
+#       group_by(id, time_travel, variable) %>%
+#       summarize(sum_est = sum(w_estimate),
+#                 sum_moe = moe_sum(moe = w_moe_95, estimate = w_estimate)) %>%
+#      ungroup() %>%
+#      write_csv(., file = paste0(getwd(), '/data/state_block_group_isochrone_demographics/',
+#                                  i, '_iso_demos_', Sys.Date(), '.csv'))
+#     
+#     }; toc() # clock out fo the entire loop, XXXXX
+# 
+# 
+# temp_int %>% ggplot(aes(prop_in)) + geom_density() # rut row
+# 
+# (temp_int %>% filter(prop_in > 1) %>% arrange(desc(prop_in)) -> large_prop_in)
+# large_prop_in %>% tail()
+# 
+# large_prop_in %>% summary()
+# 
+# # cbg_ply %>% 
+# #   filter(GEOID %in% large_prop_in$GEOID) %>% mapview() + 
+# #   mapview(ds_isochrones %>% filter(id %in% large_prop_in$id & time_travel == '0_15'))
+# 
+# # mapview(ds_isochrones %>% filter(id %in% large_prop_in$id & time_travel == '16_30'))
+# 
+# # known st_intersection warning about spatially constant assumption
+# warnings() # NOT a problem at all.
+# 
+# # OR the warnings are from st_par's split
+# rm(temp_int)
+
+
+```
+
+# TODO prop_in distribution testing after all of the parts are stacked up.
+
+
+
+
+
+### A multiparts
+
+### B fix multiparts
+
+### C calculate racial indices
+
+
+## joins with biodiveristy data
+
+## statistical analyses
+
+
+
+
+
+```{r}
+
+# create data path (DHL erased water area from all CBG's in another project)
+data_path <- '/Users/dlocke/Diversity_Inclusion_USDA_FS_HR/data/National_Census_Block_Groups_ACS_2013-2017_NO_WATER/'
+
+(files     <- dir(data_path, recursive = TRUE, pattern = "*.shp")); files # get file names
+
+library(future)
+# https://furrr.futureverse.org/articles/articles/chunking.html
+
+# all of this is for the multi-core furrr
+message(paste("Number of cores available:", availableCores()))
+options(mc.cores = 5L) # set the number of cores to use
+message(paste("Number of cores available:", availableCores()))
+
+options(future.rng.onMisuse="ignore")
+future::plan(multisession)
+
+HERE
+# read in block groups (with water erased) state and stack them all together
+tic(); (
+  cbg_ply_no_water <- tibble(filename = files) %>%
+    mutate(state = str_sub(filename, 11, 12)) %>% 
+    filter(state %in% states_to_query$state) %>% 
+    slice(1:10) %>% 
+    mutate(  fc = furrr::future_map(filename, ~st_read(file.path(data_path, .), 
+                                                       quiet = TRUE))
+           , fc = map(fc, ~dplyr::select(., GEOID, county
+                                         , area_cbg_km2 = ar_cb_2
+                                         )
+                                         )
+           , fc = furrr::future_map(fc, ~st_make_valid(.))
+           ) %>% 
+    unnest(cols = fc) %>%
+    st_as_sf() %>%
+    st_transform(., crs = st_crs(holc)) # %>% 
+    # mutate(
+    #  area_holc_km2_test = as.double(st_area(.) / 1e+6))
+    ); beep(); toc() # ~2 mins without st_make_valid, 5.5 minutes with st_make_valid
+
+
+# old and not parallel
+# # read in block groups (with water erased) state and stack them all together
+# tic(); (
+#   cbg_ply_no_water <- tibble(filename = files) %>%
+#     mutate(  state = str_sub(filename, 11, 12)) %>% 
+#     filter(state %in% states_to_query$state) %>% 
+#     # slice(1:5) %>% 
+#     mutate(  file_contents = map(filename, ~ st_read(file.path(data_path, .)))
+#            # , file_contents = map(file_contents, ~st_make_valid(.))
+#            ) %>%
+#     select(-state) %>% # to prevent duplicate names after the unnesting
+#     unnest(cols = file_contents) %>%
+#     st_as_sf() %>%
+#     select(GEOID, state, county, area_cbg_km2 = ar_cb_2) %>%
+#     st_transform(., crs = st_crs(holc)) # %>% 
+#     # st_parallel <- function(sf_df, sf_func, n_cores, ...)
+#     # st_parallel(., st_make_valid, n_cores = 5)
+#     # st_make_valid()
+#   ); beep(); toc() # ~2 mins
+
+```
+
+
+
+## 1 bring HOLC polygons
+```{r eval=FALSE, include=FALSE}
+
+list.files('input_data/HOLC_shapefile/')
+
+tic(); holc_poly <- st_read('input_data/HOLC_shapefile/holc_ad_data.shp') %>% 
+  # filter(!is.na(holc_grade) & holc_grade != 'E') %>% 
+  # st_cast('POLYGON') %>% # TODO do we want to 'explode'? We may need to for demographics
+  filter(!st_is_empty(.)) %>% 
+  st_make_valid(.) %>% 
+  rowid_to_column() %>% 
+  mutate(  id = paste(state, city, holc_id, holc_grade, rowid, sep = '_')
+         , city_state = paste0(city, ', ', state)
+         , holc_area = st_area(.)) %>% 
+  select(id, state, city, holc_id, holc_grade, city_state, holc_area); toc() # < 3 seconds
+
+
+
+all.equal(n_distinct(holc_poly$id), dim(holc_poly)[1])
+
+```
+
+
+
+
+#### A double checks
+```{r eval=FALSE, include=FALSE}
+
+birds %>% summary()
+birds %>% map(., ~sum(is.na(.))) # check for NA's
+birds %>% filter(is.na(Slope)) %>% View()
+
+```
+
+#### B attempt join
+```{r eval=FALSE, include=FALSE}
+
+test <- left_join(birds, holc_poly) # danger
+test <- left_join(birds, holc_poly, by = c('holc_id', 'holc_grade', 'city'))
+
+
+holc_poly %>% anti_join(., birds, by = c('holc_id', 'holc_grade', 'city'))
+
+
+birds %>% anti_join(., holc_poly, by = c('holc_id', 'holc_grade', 'city'))
+
+
+birds %>% left_join(., holc_poly %>% st_drop_geometry(.)
+                    , by = c('holc_id', 'holc_grade', 'city')
+                    )
+
+```
+
+
+
