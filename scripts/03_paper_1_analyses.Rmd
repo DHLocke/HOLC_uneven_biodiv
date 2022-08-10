@@ -60,10 +60,20 @@ holc_pal <- c('#92BC6B' # green
 ## A main analysis table
 ```{r}
 
-(comb <- read_csv(paste0(getwd(), '/input_data/main_combined_2022-05-27.csv')))
+(
+  comb <- read_csv(paste0(getwd(), '/input_data/main_combined_2022-05-27.csv')) 
+  |> left_join(
+    read_csv(paste0(getwd()
+                    , '/input_data/holc_id_by_WITH_biodiv_collection_code.csv'))
+    |> select(-'...1')
+    , by = 'id'
+    )
+  
+  )
 
 # a few checks
 comb |> glimpse()
+
 
 
 # how many GBIF observations?
@@ -401,7 +411,7 @@ comb |>
 (comp_pred |> tabyl(city) |> tibble() |> arrange(desc(n)) |> slice(1:48) -> big_city)
 (comp_pred |> tabyl(city) |> tibble() |> arrange(n)       |> slice(1:48) -> small_city)
 
-
+# TODO renae prediction and pretty HOlC Grade up make all cities in ~50 chunks.
 comp_pred |> 
   filter(city %in% big_city$city) |>
   # filter(city %in% small_city$city) |> 
@@ -413,6 +423,10 @@ comp_pred |>
   theme_bw(10) + 
   NULL
 
+# ggsave(  filename = paste0(getwd(), '/figures/pred_city_large_', Sys.Date(), '.png')
+#        # , width = 8.7, height = 10, units = 'cm', dpi = 450
+#        , scale = 1.25)
+
 comp_pred |> 
   # filter(city %in% big_city$city) |>
   filter(city %in% small_city$city) |>
@@ -423,6 +437,41 @@ comp_pred |>
   # facet_wrap(~holc_grade) + 
   theme_bw(10) + 
   NULL
+
+# ggsave(  filename = paste0(getwd(), '/figures/pred_city_small_', Sys.Date(), '.png')
+#        # , width = 8.7, height = 10, units = 'cm', dpi = 450
+#        , scale = 1.25)
+
+# # all city as a dynamic webpage
+# qplot(holc_grade, exp(FRb), data = comp_pred) +
+#   trelliscopejs::facet_trelliscope(~msa_NAME)
+# 
+# # all city?
+# all_city_rirs <- comp_pred |> 
+#   # mutate(faceter = str_wrap(msa_NAME, width = 25)) |> pull(faceter)
+#   # filter(city %in% big_city$city) |>
+#   # filter(city %in% small_city$city) |>
+#   ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+#   geom_point(alpha = .5) +
+#   geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) +
+#   trelliscopejs::facet_trelliscope(~msa_NAME #, scales = 'free_y'
+#                                     # , ncol = 7, nrow = 2, width = 300
+#                                    ) +
+#   # facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y'
+#   #            , ncol = 5
+#   #            ) +
+#   # facet_wrap(~holc_grade) + 
+#   theme_bw(10) + 
+#   NULL
+# 
+# 
+# 
+# plotly
+# l <- plotly::ggplotly(all_city_rirs
+#                       # , height = 
+#                         )
+# htmlwidgets::saveWidget(l, "index.html")
+
 
 
 # # City-specific predictions
