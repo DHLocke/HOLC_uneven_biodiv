@@ -62,13 +62,12 @@ holc_pal <- c('#92BC6B' # green
 
 (
   comb <- read_csv(paste0(getwd(), '/input_data/main_combined_2022-05-27.csv')) 
-  |> left_join(
-    read_csv(paste0(getwd()
-                    , '/input_data/holc_id_by_WITH_biodiv_collection_code.csv'))
-    |> select(-'...1')
-    , by = 'id'
-    )
-  
+  # |> left_join(
+  #   read_csv(paste0(getwd()
+  #                   , '/input_data/holc_id_by_WITH_biodiv_collection_code.csv'))
+  #   |> select(-'...1')
+  #   , by = 'id'
+  #   )
   )
 
 # a few checks
@@ -411,32 +410,33 @@ comb |>
 (comp_pred |> tabyl(city) |> tibble() |> arrange(desc(n)) |> slice(1:48) -> big_city)
 (comp_pred |> tabyl(city) |> tibble() |> arrange(n)       |> slice(1:48) -> small_city)
 
-# TODO renae prediction and pretty HOlC Grade up make all cities in ~50 chunks.
-comp_pred |> 
-  filter(city %in% big_city$city) |>
-  # filter(city %in% small_city$city) |> 
-  ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
-  geom_point(alpha = .5) +
-  geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) + 
-  facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y') +
-  # facet_wrap(~holc_grade) + 
-  theme_bw(10) + 
-  NULL
+# # Big cities
+# comp_pred |> 
+#   filter(city %in% big_city$city) |>
+#   # filter(city %in% small_city$city) |> 
+#   ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+#   geom_point(alpha = .5) +
+#   geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) + 
+#   facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y') +
+#   # facet_wrap(~holc_grade) + 
+#   theme_bw(10) + 
+#   NULL
+# 
+# # ggsave(  filename = paste0(getwd(), '/figures/pred_city_large_', Sys.Date(), '.png')
+# #        # , width = 8.7, height = 10, units = 'cm', dpi = 450
+# #        , scale = 1.25)
 
-# ggsave(  filename = paste0(getwd(), '/figures/pred_city_large_', Sys.Date(), '.png')
-#        # , width = 8.7, height = 10, units = 'cm', dpi = 450
-#        , scale = 1.25)
-
-comp_pred |> 
-  # filter(city %in% big_city$city) |>
-  filter(city %in% small_city$city) |>
-  ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
-  geom_point(alpha = .5) +
-  geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) + 
-  facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y') +
-  # facet_wrap(~holc_grade) + 
-  theme_bw(10) + 
-  NULL
+# # small cities
+# comp_pred |> 
+#   # filter(city %in% big_city$city) |>
+#   filter(city %in% small_city$city) |>
+#   ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+#   geom_point(alpha = .5) +
+#   geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) + 
+#   facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y') +
+#   # facet_wrap(~holc_grade) + 
+#   theme_bw(10) + 
+#   NULL
 
 # ggsave(  filename = paste0(getwd(), '/figures/pred_city_small_', Sys.Date(), '.png')
 #        # , width = 8.7, height = 10, units = 'cm', dpi = 450
@@ -474,41 +474,110 @@ comp_pred |>
 
 
 
-# # City-specific predictions
-# comp_pred |> 
-#   filter(city %in% big_city$city) |>
-#   # filter(city %in% small_city$city) |> 
-#   ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
-#   geom_point() +
-#   geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) + 
-#   facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y') +
-#   # facet_wrap(~holc_grade) + 
-#   theme_bw(10) + 
-#   NULL
+# # City-specific predictions: all cities in 50 city cuncks
+(comp_pred |> distinct(city) |> arrange(city) |> pull(city) -> cities)
+(comp_pred |> distinct(msa_NAME) |> arrange(msa_NAME) |> pull(msa_NAME) -> MSAs)
+
+# batch 1: 1 to 40
+comp_pred |>
+  # filter(city %in% cities[1:40]) |>
+  filter(msa_NAME %in% MSAs[1:40]) |>
+  ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+  geom_point() +
+  geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) +
+  facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y', ncol = 5) +
+  # facet_wrap(~holc_grade) +
+  labs(
+    title = 'Predicted Sampling Density of GBIF Observations by HOLC Grade'
+    , subtitle = 'batch 1: MSAs 1 - 40 in alpha-order'
+    , caption = 'model accounts for NDVI at 0.33, % protectect area at 3.15%, population per km^2 at 3,196'
+    , x = "Home Owners’ Loan Corporation (HOLC)"
+    , y = 'Predicted Sampling Density'
+  ) +
+  theme_bw(10) +
+  NULL
+
+ggsave(filename = paste0(getwd(), '/figures/pred_city_all_1_40_', Sys.Date(), '.png')
+       , width = 6.5, height = 9, units = 'in', dpi = 450
+       , scale = 1.5)
 
 
-# comp_pred |> 
-#   filter(city %in% big_city$city) |>
-#   # filter(city %in% small_city$city) |> 
-#   ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
-#   geom_point() +
-#   geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) + 
-#   
-#   # facet_wrap(~holc_grade) + 
-#   theme_bw(10) + 
-#   NULL
 
-# comp_pred |>
-#   # filter(city %in% big_city$city) |>
-#   ggplot(aes(holc_grade, FRb, group = msa_NAME)) +
-#   geom_point(alpha = .01) +
-#   geom_line(aes(group = msa_NAME), alpha = .1) +
-#   # facet_wrap(~msa_NAME) +
-#   # facet_wrap(~holc_grade) + 
-#   theme_bw(16) + 
-#   ylim(0, 10) +
-#   NULL
 
+# batch 2: 41 to 80
+comp_pred |>
+  # filter(city %in% cities[1:40]) |>
+  filter(msa_NAME %in% MSAs[41:80]) |>
+  ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+  geom_point() +
+  geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) +
+  facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y', ncol = 5) +
+  # facet_wrap(~holc_grade) +
+  labs(
+    title = 'Predicted Sampling Density of GBIF Observations by HOLC Grade'
+    , subtitle = 'batch 2: MSAs 41 - 80 in alpha-order'
+    , caption = 'model accounts for NDVI at 0.33, % protectect area at 3.15%, population per km^2 at 3,196'
+    , x = "Home Owners’ Loan Corporation (HOLC)"
+    , y = 'Predicted Sampling Density'
+  ) +
+  theme_bw(10) +
+  NULL
+
+ggsave(filename = paste0(getwd(), '/figures/pred_city_all_41_80_', Sys.Date(), '.png')
+       , width = 6.5, height = 9, units = 'in', dpi = 450
+       , scale = 1.5)
+
+
+
+# batch 3: 81 to 120
+comp_pred |>
+  # filter(city %in% cities[1:40]) |>
+  filter(msa_NAME %in% MSAs[81:120]) |>
+  ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+  geom_point() +
+  geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) +
+  facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y', ncol = 5) +
+  # facet_wrap(~holc_grade) +
+  labs(
+    title = 'Predicted Sampling Density of GBIF Observations by HOLC Grade'
+    , subtitle = 'batch 3: MSAs 81 - 120 in alpha-order'
+    , caption = 'model accounts for NDVI at 0.33, % protectect area at 3.15%, population per km^2 at 3,196'
+    , x = "Home Owners’ Loan Corporation (HOLC)"
+    , y = 'Predicted Sampling Density'
+  ) +
+  theme_bw(10) +
+  NULL
+
+ggsave(filename = paste0(getwd(), '/figures/pred_city_all_81_120_', Sys.Date(), '.png')
+       , width = 6.5, height = 9, units = 'in', dpi = 450
+       , scale = 1.5)
+
+
+
+# batch 4: 121 to 143
+comp_pred |>
+  # filter(city %in% cities[1:40]) |>
+  filter(msa_NAME %in% MSAs[121:143]) |>
+  ggplot(aes(holc_grade, exp(FRb), group = msa_NAME)) +
+  geom_point() +
+  geom_smooth(aes(group = msa_NAME), method = 'lm', se = FALSE) +
+  facet_wrap(~str_wrap(msa_NAME, width = 25), scales = 'free_y', ncol = 5) +
+  # facet_wrap(~holc_grade) +
+  labs(
+    title = 'Predicted Sampling Density of GBIF Observations by HOLC Grade'
+    , subtitle = 'batch 4: MSAs 121 - 143 in alpha-order'
+    , caption = 'model accounts for NDVI at 0.33, % protectect area at 3.15%, population per km^2 at 3,196'
+    , x = "Home Owners’ Loan Corporation (HOLC)"
+    , y = 'Predicted Sampling Density'
+  ) +
+  theme_bw(10) +
+  NULL
+
+ggsave(filename = paste0(getwd(), '/figures/pred_city_all_121_143_', Sys.Date(), '.png')
+       , width = 6.5
+       , height = 5.625
+       , units = 'in', dpi = 450
+       , scale = 1.5)
 
 ```
 

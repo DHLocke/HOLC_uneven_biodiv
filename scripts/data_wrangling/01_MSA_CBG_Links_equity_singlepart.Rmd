@@ -1154,10 +1154,9 @@ soc_dem_max_tbl |> glimpse()
 #   write_csv(paste0('int_data/soc_dem/soc_dem_max_singlepart_'
 #                    , str_replace_all(Sys.time(), '[[:punct:]]', '_')
 #                    , '.csv'))
-  
+
+
 ```
-
-
 
 
 
