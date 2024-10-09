@@ -33,12 +33,13 @@ require(sf)
 # require(bit64)
 require(gridExtra)
 
-GBIF_USER = 'diego_ellis_soto' # Use account: i.e. diego_ellis_soto
-GBIF_PWD = 'Atelopus1!' # Password
-GBIF_EMAIL = 'diego.ellissoto@yale.edu' # User emaol i.e. diego.ellissoto@yale.edu
+GBIF_USER = '' # Use account
+GBIF_PWD = '' # Password
+GBIF_EMAIL = '' # User email
 
 # Load in all Redlined areas for each city
-holc <- st_read('/Users/diegoellis/projects/Proposals_funding/Yale_internal_grants/Redlining/Data/Inputs/Redlining_shp/fullshpfile/shapefile/holc_ad_data.shp') %>% 
+
+holc <- st_read('/Users/diegoellis/Downloads/fullshpfile/shapefile/holc_ad_data.shp') %>% 
           # , as_tibble = TRUE 
     #       dplyr::filter(!is.na(holc_grade) & holc_grade != 'E') %>% 
           sf::st_cast('POLYGON') %>% # IMPORTANT
@@ -50,49 +51,22 @@ holc <- st_read('/Users/diegoellis/projects/Proposals_funding/Yale_internal_gran
                    , area_holc_km2 = as.double(st_area(.) / 1e+6)) %>% 
           dplyr::select(id, state, city, holc_id, holc_grade, city_state, area_holc_km2) # < 3 seconds
 
-# st_write(holc, dsn = "/Users/diegoellis/Desktop/holc_singlepoly.gbd",layer="holc_poly", driver="ESRI Shapefile")
-
 
 # --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- 
 # Download gbif data from HOLC shapefile of choice:                                       
 # --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- 
 
-
-# holc_city <- holc[holc$city == 'New Haven', ] 
-
-# cities_i_downloaded <- list.files('/Users/diegoellis/projects/Proposals_funding/Yale_internal_grants/Redlining/Data/Outputs/GBIF_all_HOLC/')
-
-# This city removes cities that were already downloaded previously as running this code through all cities may take longer than a full day
-# holc_no_birmingham <- holc[!holc$city %in%  cities_i_downloaded,]
-
-# unique(holc_no_birmingham$city)
-
-
-# Run a loop through each unique city and download gbif data
-# i = unique(holc$id)[1]
-
-for(i in unique(holc$id)[4956:5000]){
-  
-  # We keep cities that have at least one record per HOLC grade.
-  # message('Keep only multipolygon that have at least one record per HOLC GRADE  ')
+for(i in unique(holc$id)){
   
   holc_singlepolygon <- holc %>% dplyr::filter(id == i)
   
   message(paste0(which(holc$id == holc_singlepolygon$id), ' out of ', nrow(holc)))
   
   # message(paste0('Choose city ', unique(holc_singlepolygon$city), ' multipolygon ', holc_singlepolygon$id))
-  
-  # Simplify the spatial structure of the shapefiles
-  # sf::st_bbox()
-  
-  
+
   wkt_siplified_holc_city <- rmapshaper::ms_simplify( as(tmaptools::bb_poly(holc_singlepolygon), 'Spatial') )
   
   message(paste0('Starting GBIF download ', unique(holc_singlepolygon$city), ' multipolygon ', holc_singlepolygon$id ))
-  
-  
-  
-  # Specific query: Inspired by Downloading occurrences from a long list of species in R and python
   
   # This is the key part for downloading biodiversity data within a city shapefile. 
   gbif_download_key <- occ_download(
@@ -159,13 +133,7 @@ for(i in unique(holc$id)[4956:5000]){
   out_amphibia <- out %>% dplyr::filter(class %in% paste0(taxa_I_want))
   
   outdir <- '/Users/diegoellis/projects/Proposals_funding/Yale_internal_grants/Redlining/Data/Outputs/GBIF_all_HOLC_2022/'
-  
-  # holc_city_name <- unique(holc_city$city)
-  
-  # Intersect GBIF with holc:
-  # gbif_df <- out_amphibia
-  # kingdom <- 'Amphibia'
-  
+
   
   # We run this function separately for birds, mammals, reptiles, amphibians and insects.
   inters_gbif_holc <- function(gbif_df, holc_singlepolygon, outdir, kingdom){
@@ -182,15 +150,7 @@ for(i in unique(holc$id)[4956:5000]){
     
     gbif_df_sp_sf <- st_as_sf(gbif_df_sp)
     
-    # myprj <- paste0("+proj=laea +lat_0=", round(mean(gbif_df_sp$decimalLatitude)),' +lon_0=', round(mean(gbif_df_sp$decimalLongitude)),' +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0')
-    # gbif_df_sp <- spTransform(gbif_df_sp, myprj)
     
-    # Using a zero-width buffer cleans up many topology problems in R.
-    # gbif_df_sp <- gBuffer(gbif_df_sp, byid=TRUE, width=0)
-    
-    # gbif_df_sp <- gSimplify(gbif_df_sp, tol = 0.00001)
-    
-    # holc_city_to_work_with_sf <- st_transform(holc_city_to_work_with_sf, st_crs(gbif_df_sp_sf))
     gbif_holc_int <- gbif_df_sp_sf %>% st_intersection((holc_singlepolygon))
     gbif_holc_int$holc_id <- as.factor(gbif_holc_int$holc_id)
     gbif_holc_int$holc_grade <- as.factor(gbif_holc_int$holc_grade)
@@ -223,9 +183,6 @@ for(i in unique(holc$id)[4956:5000]){
       
     } # End of loop that checks whether there is more than one observation:
     
-    
-    # ggplot(holc_city_sf_n_obs_sp,aes(x = holc_id, y = n_obs)) + geom_point()
-    # ggplot(holc_city_sf_n_obs_sp,aes(x = holc_id, y = n_obs, color = holc_grade)) + geom_point()
   }
   
   # If we want all taxa:
@@ -321,8 +278,4 @@ for(i in unique(holc$id)[4956:5000]){
   
   message(paste0('Finished ', unique(holc_singlepolygon$id)))
   
-} # Polygon 1404 1404 out of 9848 # Error in rep(x1, ny) : invalid 'times' argument # 9852
-
-# GBIF download API: using the route /occurrence/download/, and the functions that are prefixed with rgbif::occ_download*
-
-# These functions have a slightly different interface than rgbif::occ_search and rgbif::occ_data, so there’s the downside of learning a new query interface. However, plus side is that the query interface is more flexible, and you can get as much data as you like. Another down side is that you don’t get the data immediately, but rather wait for the file to be prepared. But don’t worry! We make it easy to get the file and import without leaving R.
+}

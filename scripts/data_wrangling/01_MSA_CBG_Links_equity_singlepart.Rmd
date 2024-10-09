@@ -74,7 +74,7 @@ vapply(packs, library, character.only = TRUE, logical(1), logical.return = TRUE,
 
 
 # setting for get_acs
-census_api_key('db9b3481879b9e79eb8c86608656c3c8a8640bbb', install = TRUE, overwrite = TRUE)
+census_api_key('[snip]', install = TRUE, overwrite = TRUE)
 readRenviron("~/.Renviron")
 options(tigris_use_cache = TRUE)
 
@@ -1154,9 +1154,10 @@ soc_dem_max_tbl |> glimpse()
 #   write_csv(paste0('int_data/soc_dem/soc_dem_max_singlepart_'
 #                    , str_replace_all(Sys.time(), '[[:punct:]]', '_')
 #                    , '.csv'))
-
-
+  
 ```
+
+
 
 
 
